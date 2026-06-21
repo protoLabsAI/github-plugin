@@ -1,0 +1,6 @@
+# Test-only deps. At runtime, langchain-core is provided by the host (protoAgent);
+# the plugin adds NO runtime pip deps. These let the suite run standalone in CI.
+langchain-core>=0.2
+pyyaml>=6
+pytest>=8
+pytest-asyncio>=0.23   # for the async-tool tests the team adds (asyncio_mode=auto)

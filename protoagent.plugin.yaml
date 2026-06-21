@@ -1,0 +1,29 @@
+# protoagent.plugin.yaml — DATA ONLY (the host reads this without importing code).
+# Keep `version` in lockstep with pyproject.toml (tests/test_version.py asserts it).
+id: github
+name: GitHub (read/write tools)
+version: 0.1.0
+description: >-
+  Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
+  read tools (PRs, issues, diffs, CI, repo files/contents) are always on; the write
+  tools (create issue, comment, create PR) load ONLY when `github.write: true` — so a
+  research/Lead agent stays read-only while a coding/PM agent gets write, purely by
+  its own per-instance config (ADR 0019). Supersedes the read-only in-tree `github`
+  plugin. Tools degrade to a readable error if `gh` isn't installed/authenticated.
+enabled: false                 # SHIP DISABLED — enabling is the operator's trust decision
+repository: https://github.com/protoLabsAI/github-plugin
+min_protoagent_version: "0.27.0"
+
+# Config (ADR 0019): defaults are the source of truth; langgraph-config.yaml overlays.
+# `write` is the per-agent gate — each agent's config decides read-only vs read+write.
+config_section: github
+config:
+  write: false                 # false = read tools only; true = read + write tools
+
+# Auth: `gh` uses its own ambient auth (`gh auth login`), or GITHUB_TOKEN / GH_TOKEN
+# from the env if set. No plugin secret needed for public-repo reads.
+
+# Declarative transparency (shown in the console; not yet enforced).
+capabilities:
+  network: ["api.github.com"]  # shells out to `gh`, which talks to api.github.com
+  filesystem: none

@@ -1,0 +1,30 @@
+name: CI
+
+# Lint + test the plugin. Host-free: needs only requirements-dev.txt (no protoAgent).
+# Runs on the org's Namespace Linux profile; falls back to a GitHub-hosted runner on
+# a fork via the NSC_RUNNER repo variable.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ vars.NSC_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt ruff
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Test
+        run: pytest -q

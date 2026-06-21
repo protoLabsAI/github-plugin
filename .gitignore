@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Coding-agent (proto) scratch — never commit
+.proto/
+
+# beads: keep the JSONL truth, ignore the binary db
+.beads/*.db
+.beads/*.db-shm
+.beads/*.db-wal
+.DS_Store
