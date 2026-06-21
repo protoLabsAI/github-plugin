@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from .gh_cli import bad_repo
+from .gh_cli import bad_repo, check_gh_error, run_gh
 
 
 def get_write_tools() -> list:
@@ -36,11 +36,19 @@ def get_write_tools() -> list:
             body: Issue body (Markdown).
             labels: Optional comma-separated label names.
 
-        TODO(team): implement via `gh issue create`. Return the new issue URL.
+        Returns the new issue URL.
         """
         if err := bad_repo(repo):
             return err
-        return "Error: github_create_issue is not implemented yet (stub — to be built by the team)."
+        args = ["issue", "create", "--repo", repo, "--title", title, "--body", body]
+        for label in labels.split(","):
+            label = label.strip()
+            if label:
+                args += ["--label", label]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        return out.strip()
 
     @tool
     async def github_comment(repo: str, number: int, body: str) -> str:
