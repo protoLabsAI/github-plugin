@@ -71,3 +71,49 @@ async def test_gh_failure_returns_check_gh_error():
     with patch("ghplugin.write_tools.run_gh", fake):
         out = await tool.ainvoke({"repo": "o/n", "title": "t"})
     assert out == "Error (gh exit 1): could not create issue: forbidden"
+
+
+def _comment():
+    return {t.name: t for t in get_write_tools()}["github_comment"]
+
+
+async def test_comment_returns_comment_url():
+    """On success the tool returns the new comment URL (gh's stdout, stripped)."""
+    tool = _comment()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/42#issuecomment-1\n", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 42, "body": "Thanks!"})
+    assert out == "https://github.com/o/n/issues/42#issuecomment-1"
+    args = fake.call_args.args[0]
+    assert args[:5] == ["issue", "comment", "42", "--repo", "o/n"]
+    assert "--body" in args and args[args.index("--body") + 1] == "Thanks!"
+
+
+async def test_comment_number_is_stringified():
+    """The integer number is passed to gh as a string argument."""
+    tool = _comment()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/7#issuecomment-9", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "number": 7, "body": "hi"})
+    args = fake.call_args.args[0]
+    assert args[2] == "7"
+
+
+async def test_comment_bad_repo_short_circuits():
+    """An invalid repo returns the bad_repo error and never shells out."""
+    tool = _comment()
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "not-a-repo", "number": 1, "body": "hi"})
+    assert out.startswith("Error:")
+    assert "owner/name" in out
+    fake.assert_not_called()
+
+
+async def test_comment_gh_failure_returns_check_gh_error():
+    """A nonzero gh exit becomes a readable Error string (via check_gh_error)."""
+    tool = _comment()
+    fake = AsyncMock(return_value=(1, "", "could not comment: forbidden"))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 1, "body": "hi"})
+    assert out == "Error (gh exit 1): could not comment: forbidden"
