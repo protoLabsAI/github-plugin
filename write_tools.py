@@ -59,11 +59,15 @@ def get_write_tools() -> list:
             number: Issue or PR number (a PR is an issue for commenting).
             body: The comment body (Markdown).
 
-        TODO(team): implement via `gh issue comment {number} --repo {repo} --body ...`.
+        Returns the new comment URL.
         """
         if err := bad_repo(repo):
             return err
-        return "Error: github_comment is not implemented yet (stub — to be built by the team)."
+        args = ["issue", "comment", str(number), "--repo", repo, "--body", body]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        return out.strip()
 
     @tool
     async def github_create_pr(repo: str, head: str, title: str, body: str = "", base: str = "main") -> str:
