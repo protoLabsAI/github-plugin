@@ -80,10 +80,27 @@ def get_write_tools() -> list:
             body: PR body (Markdown).
             base: Base branch to merge into (default ``main``).
 
-        TODO(team): implement via `gh pr create`. Return the new PR URL.
+        Returns the new PR URL.
         """
         if err := bad_repo(repo):
             return err
-        return "Error: github_create_pr is not implemented yet (stub — to be built by the team)."
+        args = [
+            "pr",
+            "create",
+            "--repo",
+            repo,
+            "--head",
+            head,
+            "--base",
+            base,
+            "--title",
+            title,
+            "--body",
+            body,
+        ]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        return out.strip()
 
     return [github_create_issue, github_comment, github_create_pr]
