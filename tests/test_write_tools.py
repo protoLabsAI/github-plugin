@@ -117,3 +117,61 @@ async def test_comment_gh_failure_returns_check_gh_error():
     with patch("ghplugin.write_tools.run_gh", fake):
         out = await tool.ainvoke({"repo": "o/n", "number": 1, "body": "hi"})
     assert out == "Error (gh exit 1): could not comment: forbidden"
+
+
+def _create_pr():
+    return {t.name: t for t in get_write_tools()}["github_create_pr"]
+
+
+async def test_create_pr_returns_pr_url():
+    """On success the tool returns the new PR URL (gh's stdout, stripped)."""
+    tool = _create_pr()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/pull/5\n", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "head": "feature", "title": "Add thing", "body": "Does the thing"})
+    assert out == "https://github.com/o/n/pull/5"
+    args = fake.call_args.args[0]
+    assert args[:4] == ["pr", "create", "--repo", "o/n"]
+    assert "--head" in args and args[args.index("--head") + 1] == "feature"
+    assert "--title" in args and args[args.index("--title") + 1] == "Add thing"
+    assert "--body" in args and args[args.index("--body") + 1] == "Does the thing"
+
+
+async def test_create_pr_base_defaults_to_main():
+    """The base flag is always passed and defaults to ``main`` when omitted."""
+    tool = _create_pr()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/pull/6", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "head": "feature", "title": "t"})
+    args = fake.call_args.args[0]
+    assert "--base" in args and args[args.index("--base") + 1] == "main"
+
+
+async def test_create_pr_base_override_is_passed():
+    """An explicit base branch is passed through to gh."""
+    tool = _create_pr()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/pull/7", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "head": "feature", "title": "t", "base": "develop"})
+    args = fake.call_args.args[0]
+    assert "--base" in args and args[args.index("--base") + 1] == "develop"
+
+
+async def test_create_pr_bad_repo_short_circuits():
+    """An invalid repo returns the bad_repo error and never shells out."""
+    tool = _create_pr()
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "not-a-repo", "head": "feature", "title": "t"})
+    assert out.startswith("Error:")
+    assert "owner/name" in out
+    fake.assert_not_called()
+
+
+async def test_create_pr_gh_failure_returns_check_gh_error():
+    """A nonzero gh exit becomes a readable Error string (via check_gh_error)."""
+    tool = _create_pr()
+    fake = AsyncMock(return_value=(1, "", "could not create pr: forbidden"))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "head": "feature", "title": "t"})
+    assert out == "Error (gh exit 1): could not create pr: forbidden"
