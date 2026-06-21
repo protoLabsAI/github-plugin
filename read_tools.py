@@ -241,7 +241,15 @@ def get_read_tools() -> list:
         """
         if err := bad_repo(repo):
             return err
-        return "Error: github_read_file is not implemented yet (stub — to be built by the team)."
+        args = ["api", f"repos/{repo}/contents/{path}", "-H", "Accept: application/vnd.github.raw+json"]
+        if ref.strip():
+            args += ["-f", f"ref={ref}"]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        if len(out) > 20000:
+            out = out[:20000] + "\n… (truncated at 20000 chars)"
+        return out
 
     @tool
     async def github_repo_contents(repo: str, path: str = "", ref: str = "") -> str:
