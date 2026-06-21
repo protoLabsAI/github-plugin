@@ -259,14 +259,29 @@ def get_read_tools() -> list:
             repo: Repository as ``owner/name`` (required, no default).
             path: Directory path within the repo (default: repo root).
             ref: Optional branch / tag / SHA (default: the repo's default branch).
-
-        TODO(team): implement via `gh api repos/{repo}/contents/{path}?ref={ref}` —
-        returns a JSON array of {name, path, type, size}. Format a compact listing;
-        validate repo; return a readable Error on failure.
         """
         if err := bad_repo(repo):
             return err
-        return "Error: github_repo_contents is not implemented yet (stub — to be built by the team)."
+        args = ["api", f"repos/{repo}/contents/{path}" if path else f"repos/{repo}/contents"]
+        if ref.strip():
+            args += ["-f", f"ref={ref}"]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        try:
+            items = json.loads(out)
+        except json.JSONDecodeError:
+            return f"Error: could not parse gh output: {out[:200]}"
+        if not items:
+            return f"No contents in {repo}/{path or '.'}."
+        type_map = {"file": "FILE", "dir": "DIR ", "symlink": "LINK", "submodule": "SUB "}
+        lines = [f"{repo}/{path or '.'} — {len(items)} item(s):"]
+        for entry in items:
+            etype = entry.get("type", "")
+            t = type_map.get(etype, (etype or "?").upper())[:4]
+            size = "0" if etype == "dir" else str(entry.get("size", 0))
+            lines.append(f"{t:4s} {size:>8s}  {entry.get('name', '?')}  ({entry.get('path', '')})")
+        return "\n".join(lines)
 
     return [
         github_get_pr,
