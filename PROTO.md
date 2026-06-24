@@ -37,19 +37,24 @@ gh_cli.py                # vendored async `gh` runner (run_gh, check_gh_error, b
 read_tools.py            # 8 read tools (6 ported core + read_file/repo_contents)
 write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
 gh_issue.py              # /issue chat command logic (user-only; gate-checked; configured repo)
-api.py                   # board view routers — public PAGE + gated data routes (config/issues/prs/issue)
-view.py                  # board PAGE (HTML): two tabs (Issues/PRs) + repo picker + new-issue form, --pl-* themed
+api.py                   # routers — public PAGES (view/new-issue) + gated data routes (config/issues/prs/issue)
+view.py                  # PAGE = read-only board (Issues/PRs tabs + repo picker); NEW_ISSUE_PAGE = file-an-issue form. --pl-* themed
 tests/                   # host-free pytest (gating + version coherence + routes via TestClient)
 ```
 
-**Console board view (ADR 0026/0038/0042).** `register()` mounts two routers when the
-host exposes `register_router` (guarded — degrade-safe): the PAGE on the PUBLIC
+**Console surfaces (ADR 0026/0038/0042/0057).** `register()` mounts two routers when the
+host exposes `register_router` (guarded — degrade-safe): the PAGES on the PUBLIC
 `/plugins/github` prefix (iframe-loadable; a page-load can't carry a bearer) and the
-DATA routes on the GATED `/api/plugins/github` prefix (the page fetches them with the
-DS plugin-kit's `apiFetch`, which attaches the operator bearer from the postMessage
-handshake). The page is vanilla JS themed entirely from `--pl-*` tokens (no host build).
-The manifest's `views:` entry points the console at `/plugins/github/view`. `POST /issue`
-reuses the SAME `file_issue` gate path as the `/issue` command, so they can't diverge.
+DATA routes on the GATED `/api/plugins/github` prefix (pages fetch them with the DS
+plugin-kit's `apiFetch`, which attaches the operator bearer from the postMessage
+handshake). Pages are vanilla JS themed entirely from `--pl-*` tokens (no host build).
+Two manifest `views`, three surfaces, deliberately split:
+- **`/view`** — the READ-ONLY board (Issues/PRs tabs + repo picker + state filter). Right
+  dock + a ⌘K morph (`palette: inline`). No writes — it's a viewer.
+- **`/new-issue`** — the compact file-an-issue form. A util-bar widget pill (`utility`,
+  opens its dialog) AND a distinct ⌘K page (`palette: { path }`). `POST /issue` reuses the
+  SAME `file_issue` gate path as the `/issue` command, so they can't diverge.
+Filing lives in the widget + palette, NOT the board (keep the board read-only).
 
 ## 4. The gating design — DO NOT BREAK IT
 

@@ -74,6 +74,21 @@ def test_view_page_served():
     assert r.status_code == 200 and "GitHub" in r.text
 
 
+def test_new_issue_page_served():
+    r = TestClient(_app()).get("/plugins/github/new-issue")
+    assert r.status_code == 200 and "New issue" in r.text
+
+
+def test_board_page_is_read_only():
+    """The board is a viewer — it must NOT POST to /issue (filing lives in the widget/palette)."""
+    from ghplugin.view import PAGE
+
+    # The board must not POST to the create-issue endpoint. Match it exactly with its
+    # closing quote, since "/api/plugins/github/issue" is a substring of ".../issues".
+    assert '/api/plugins/github/issue"' not in PAGE  # no create-issue from the board
+    assert "/api/plugins/github/issues" in PAGE and "/api/plugins/github/prs" in PAGE  # reads only
+
+
 def test_config_route_returns_repos_and_default():
     c = TestClient(_app())
     body = c.get("/api/plugins/github/config").json()
@@ -138,10 +153,30 @@ def test_legacy_host_without_register_router_still_loads_tools(make_legacy_regis
 
 
 def test_page_references_gated_endpoints():
-    """The page fetches its DATA from the gated /api/plugins/github routes."""
-    from ghplugin.view import PAGE
+    """The pages fetch their DATA from the gated /api/plugins/github routes."""
+    from ghplugin.view import NEW_ISSUE_PAGE, PAGE
 
     assert "/api/plugins/github/config" in PAGE
     assert "/api/plugins/github/issues" in PAGE
     assert "/api/plugins/github/prs" in PAGE
     assert "/_ds/plugin-kit" in PAGE  # themed via the DS kit
+    # The new-issue page posts to the gated create route + is kit-themed.
+    assert "/api/plugins/github/issue" in NEW_ISSUE_PAGE
+    assert "/_ds/plugin-kit" in NEW_ISSUE_PAGE
+
+
+def test_manifest_declares_board_and_widget_views():
+    """Two views: the read-only board (right dock + ⌘K) and the file-an-issue widget
+    (util-bar pill + ⌘K palette page)."""
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    views = {v["id"]: v for v in yaml.safe_load((root / "protoagent.plugin.yaml").read_text())["views"]}
+    board, new_issue = views["github"], views["github-new-issue"]
+    assert board["placement"] == "right" and board["palette"] == "inline"
+    assert board["path"] == "/plugins/github/view"
+    assert new_issue["utility"]["info"]  # a util-bar pill with hover info
+    assert new_issue["palette"]["path"] == "/plugins/github/new-issue"  # distinct ⌘K page
+    assert new_issue["path"] == "/plugins/github/new-issue"
