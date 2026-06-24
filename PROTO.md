@@ -37,8 +37,19 @@ gh_cli.py                # vendored async `gh` runner (run_gh, check_gh_error, b
 read_tools.py            # 8 read tools (6 ported core + read_file/repo_contents)
 write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
 gh_issue.py              # /issue chat command logic (user-only; gate-checked; configured repo)
-tests/                   # host-free pytest (gating + version coherence)
+api.py                   # board view routers — public PAGE + gated data routes (config/issues/prs/issue)
+view.py                  # board PAGE (HTML): two tabs (Issues/PRs) + repo picker + new-issue form, --pl-* themed
+tests/                   # host-free pytest (gating + version coherence + routes via TestClient)
 ```
+
+**Console board view (ADR 0026/0038/0042).** `register()` mounts two routers when the
+host exposes `register_router` (guarded — degrade-safe): the PAGE on the PUBLIC
+`/plugins/github` prefix (iframe-loadable; a page-load can't carry a bearer) and the
+DATA routes on the GATED `/api/plugins/github` prefix (the page fetches them with the
+DS plugin-kit's `apiFetch`, which attaches the operator bearer from the postMessage
+handshake). The page is vanilla JS themed entirely from `--pl-*` tokens (no host build).
+The manifest's `views:` entry points the console at `/plugins/github/view`. `POST /issue`
+reuses the SAME `file_issue` gate path as the `/issue` command, so they can't diverge.
 
 ## 4. The gating design — DO NOT BREAK IT
 

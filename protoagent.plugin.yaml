@@ -31,6 +31,12 @@ settings:
   - {key: default_repo, label: "Default repo (owner/name)", type: string}
   - {key: repos, label: "Repo picker list", type: string_list}
 
+# Console board view (ADR 0026) — a sandboxed iframe the plugin serves itself at
+# /plugins/github/view (api.py). Two tabs (Issues / PRs) over the repo picker above.
+# `placement: right` opens it in the right dock; views are drag-sortable in the console.
+views:
+  - { id: github, label: GitHub, icon: Github, path: /plugins/github/view, placement: right }
+
 # Auth: `gh` uses its own ambient auth (`gh auth login`), or GITHUB_TOKEN / GH_TOKEN
 # from the env if set. No plugin secret needed for public-repo reads.
 

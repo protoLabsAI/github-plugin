@@ -31,6 +31,7 @@ class _Registry:
         self.config = config or {}
         self.tools: list = []
         self.chat_commands: dict = {}  # token -> handler (the host's chat-command seam)
+        self.routers: list = []  # {"router", "prefix"} (the host's router seam)
 
     def register_tool(self, t):
         self.tools.append(t)
@@ -38,9 +39,16 @@ class _Registry:
     def register_chat_command(self, name: str, handler):
         self.chat_commands[name] = handler
 
+    def register_router(self, router, prefix=None):
+        self.routers.append({"router": router, "prefix": prefix})
+
     @property
     def tool_names(self) -> list[str]:
         return [getattr(t, "name", getattr(t, "__name__", "?")) for t in self.tools]
+
+    @property
+    def router_prefixes(self) -> list[str]:
+        return [r["prefix"] for r in self.routers]
 
 
 class _LegacyRegistry:

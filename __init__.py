@@ -11,6 +11,12 @@ NOT do autonomously): registered via the host's `register_chat_command` seam whe
 host provides it, reading the configured `default_repo`/`repos` for routing. On an
 older host without that seam, `/issue` is simply skipped — the tools still load.
 
+And it serves its own console board view (two tabs: Issues / PRs) via two routers
+(public PAGE + gated DATA, the notes pattern) when the host exposes `register_router`.
+
+Every host-coupled registration (chat command, routers) is `hasattr`-guarded so the
+plugin degrades gracefully on an older host: the tools always load.
+
 Host-only imports stay LAZY (none here) so the test suite imports the modules with no
 protoAgent host present.
 """
@@ -70,9 +76,25 @@ def register(registry) -> None:
         except Exception:  # noqa: BLE001
             log.exception("[github] registering the /issue command failed")
 
+    # Console board view (ADR 0026/0038) — two routers, the notes pattern: the PAGE on
+    # the PUBLIC /plugins/github prefix (iframe-loadable), the DATA routes on the GATED
+    # /api/plugins/github prefix. Guarded so a host without register_router still loads
+    # the tools + /issue. The manifest's `views` entry points the console at /view.
+    view = False
+    if hasattr(registry, "register_router"):
+        try:
+            from .api import build_data_router, build_view_router
+
+            registry.register_router(build_view_router(), prefix="/plugins/github")
+            registry.register_router(build_data_router(cfg), prefix="/api/plugins/github")
+            view = True
+        except Exception:  # noqa: BLE001
+            log.exception("[github] registering the board view failed")
+
     log.info(
-        "[github] registered %d read tool(s)%s%s",
+        "[github] registered %d read tool(s)%s%s%s",
         n_read,
         f" + {n_write} write tool(s) (write enabled)" if write_enabled else " (read-only — github.write is false)",
         " + /issue command" if issue_cmd else "",
+        " + board view" if view else "",
     )
