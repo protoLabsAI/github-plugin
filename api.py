@@ -85,17 +85,22 @@ def _repos(cfg: dict) -> list[str]:
 
 
 def build_view_router():
-    """The board PAGE — served under the PUBLIC ``/plugins/github`` prefix (ungated)."""
+    """The PAGES — served under the PUBLIC ``/plugins/github`` prefix (ungated): the
+    read-only board (``/view``) and the compact file-an-issue form (``/new-issue``)."""
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse
 
-    from .view import PAGE
+    from .view import NEW_ISSUE_PAGE, PAGE
 
     router = APIRouter()
 
     @router.get("/view")
     async def _view():
         return HTMLResponse(PAGE)
+
+    @router.get("/new-issue")
+    async def _new_issue():
+        return HTMLResponse(NEW_ISSUE_PAGE)
 
     return router
 
