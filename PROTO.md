@@ -31,11 +31,12 @@ There is no other runner. `ruff` + `pytest` are the sole gate.
 ## 3. Where everything lives
 
 ```
-protoagent.plugin.yaml   # manifest (id: github, config_section: github, write: bool)
-__init__.py              # register() — the GATING wiring (read always; write iff github.write)
+protoagent.plugin.yaml   # manifest (id: github, config_section: github; write/default_repo/repos)
+__init__.py              # register() — gating wiring (read always; write iff github.write) + /issue
 gh_cli.py                # vendored async `gh` runner (run_gh, check_gh_error, bad_repo)
 read_tools.py            # 8 read tools (6 ported core + read_file/repo_contents)
 write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
+gh_issue.py              # /issue chat command logic (user-only; gate-checked; configured repo)
 tests/                   # host-free pytest (gating + version coherence)
 ```
 
@@ -45,6 +46,14 @@ tests/                   # host-free pytest (gating + version coherence)
 `github.write` is true** (each agent's config decides — ADR 0019). A research/Lead
 agent stays read-only; a coding/PM agent gets write. `tests/test_register.py` asserts
 both halves — keep it green.
+
+**`/issue` is a user-only chat command, not an agent tool** — creating an issue is a
+write the model must not do autonomously, so `register()` registers it via the host's
+`register_chat_command` seam (the logic lives in `gh_issue.py`). The call is guarded
+by `hasattr(registry, "register_chat_command")`, so on an older host without the seam
+`/issue` is skipped and the tools still load (degrade-safe). It routes to the
+configured `default_repo`/`repos` (never a silent default). `tests/test_issue_command.py`
+asserts both the seam-present and legacy-host paths — keep them green.
 
 ## 5. Tools (all implemented)
 
