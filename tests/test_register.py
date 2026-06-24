@@ -18,7 +18,16 @@ READ_TOOLS = {
     "github_read_file",
     "github_repo_contents",
 }
-WRITE_TOOLS = {"github_create_issue", "github_comment", "github_create_pr"}
+WRITE_TOOLS = {
+    "github_create_issue",
+    "github_comment",
+    "github_create_pr",
+    "github_edit_pr",
+    "github_merge_pr",
+    "github_close",
+    "github_set_labels",
+    "github_set_assignees",
+}
 
 
 def test_read_only_by_default(make_registry):

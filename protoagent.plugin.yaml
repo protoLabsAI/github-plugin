@@ -6,10 +6,11 @@ version: 0.1.0
 description: >-
   Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
   read tools (PRs, issues, diffs, CI, repo files/contents) are always on; the write
-  tools (create issue, comment, create PR) load ONLY when `github.write: true` — so a
-  research/Lead agent stays read-only while a coding/PM agent gets write, purely by
-  its own per-instance config (ADR 0019). Supersedes the read-only in-tree `github`
-  plugin. Tools degrade to a readable error if `gh` isn't installed/authenticated.
+  tools (create/edit/merge/close issues & PRs, comment, labels, assignees) load ONLY
+  when `github.write: true` — so a research/Lead agent stays read-only while a
+  coding/PM agent gets write, purely by its own per-instance config (ADR 0019).
+  Merging is `confirm`-guarded. Supersedes the read-only in-tree `github` plugin.
+  Tools degrade to a readable error if `gh` isn't installed/authenticated.
 enabled: false                 # SHIP DISABLED — enabling is the operator's trust decision
 repository: https://github.com/protoLabsAI/github-plugin
 min_protoagent_version: "0.27.0"
