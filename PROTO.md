@@ -34,8 +34,8 @@ There is no other runner. `ruff` + `pytest` are the sole gate.
 protoagent.plugin.yaml   # manifest (id: github, config_section: github, write: bool)
 __init__.py              # register() — the GATING wiring (read always; write iff github.write)
 gh_cli.py                # vendored async `gh` runner (run_gh, check_gh_error, bad_repo)
-read_tools.py            # 6 ported read tools (done) + read_file/repo_contents (STUBS)
-write_tools.py           # create_issue / comment / create_pr (STUBS — gated)
+read_tools.py            # 8 read tools (6 ported core + read_file/repo_contents)
+write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
 tests/                   # host-free pytest (gating + version coherence)
 ```
 
@@ -46,14 +46,25 @@ tests/                   # host-free pytest (gating + version coherence)
 agent stays read-only; a coding/PM agent gets write. `tests/test_register.py` asserts
 both halves — keep it green.
 
-## 5. What to build (the stubs)
+## 5. Tools (all implemented)
 
-Each stub has a `TODO(team)` with the exact `gh` command. Implement, then add a test
-that mocks `run_gh` and asserts the tool formats the result (and errors readably):
-- **`github_read_file`** — `gh api repos/{repo}/contents/{path}?ref={ref}` (raw media type).
-- **`github_repo_contents`** — `gh api repos/{repo}/contents/{path}` → list of entries.
-- **`github_create_issue` / `github_comment` / `github_create_pr`** — `gh issue create` /
-  `gh issue comment` / `gh pr create`; return the new URL.
+Each tool mocks `run_gh` in its test and asserts the exact argv + readable errors.
+
+**Read (always on)** — 6 ported core tools (`github_get_pr`, `github_get_issue`,
+`github_list_issues`, `github_get_commit_diff`, `github_ci_runs`, `github_run_failure`)
+plus `github_read_file` (`gh api .../contents/{path}`, raw) and `github_repo_contents`
+(directory listing).
+
+**Write (gated on `github.write`)** —
+`github_create_issue` / `github_comment` / `github_create_pr` (return the new URL),
+`github_edit_pr` (`gh pr edit` + `gh pr ready [--undo]`),
+`github_merge_pr` (`gh pr merge` — **refuses without `confirm=true`**, offers `dry_run`),
+`github_close` (close/reopen issue|pr), and `github_set_labels` / `github_set_assignees`
+(`gh {issue,pr} edit --add/--remove-{label,assignee}`). Issue-vs-PR ops take `kind`.
+
+New write op? Validate `bad_repo()`, build argv, `run_gh()`, degrade to `Error: ...`,
+add it to `get_write_tools()`'s return list **and** `WRITE_TOOLS` in `test_register.py`,
+and mirror an existing test. Anything irreversible (merge) must be `confirm`-guarded.
 
 ## 6. Rules
 
