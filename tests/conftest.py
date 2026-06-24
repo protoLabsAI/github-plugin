@@ -30,6 +30,27 @@ class _Registry:
     def __init__(self, config: dict | None = None):
         self.config = config or {}
         self.tools: list = []
+        self.chat_commands: dict = {}  # token -> handler (the host's chat-command seam)
+
+    def register_tool(self, t):
+        self.tools.append(t)
+
+    def register_chat_command(self, name: str, handler):
+        self.chat_commands[name] = handler
+
+    @property
+    def tool_names(self) -> list[str]:
+        return [getattr(t, "name", getattr(t, "__name__", "?")) for t in self.tools]
+
+
+class _LegacyRegistry:
+    """A host WITHOUT the chat-command seam (older protoAgent) — no
+    ``register_chat_command``. register() must still load the tools and just skip
+    ``/issue`` (graceful degrade)."""
+
+    def __init__(self, config: dict | None = None):
+        self.config = config or {}
+        self.tools: list = []
 
     def register_tool(self, t):
         self.tools.append(t)
@@ -42,3 +63,8 @@ class _Registry:
 @pytest.fixture
 def make_registry():
     return _Registry
+
+
+@pytest.fixture
+def make_legacy_registry():
+    return _LegacyRegistry
