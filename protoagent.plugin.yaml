@@ -42,6 +42,14 @@ views:
   - { id: github, label: GitHub, icon: Github, path: /plugins/github/view, placement: right, palette: inline }
   - { id: github-new-issue, label: New issue, icon: Bug, path: /plugins/github/new-issue, utility: { info: "File a GitHub issue" }, palette: { path: /plugins/github/new-issue } }
 
+# Auth-exempt view PAGES — a browser iframe page-load can't carry a bearer, so under
+# a token-gated deployment these would 401-blank without this. Needs a host with the
+# plugin public_paths feature; older hosts ignore it (the pages stay open-mode only).
+# The page is chrome; the DATA it fetches stays gated under /api/plugins/github/*.
+public_paths:
+  - /plugins/github/view
+  - /plugins/github/new-issue
+
 # Auth: `gh` uses its own ambient auth (`gh auth login`), or GITHUB_TOKEN / GH_TOKEN
 # from the env if set. No plugin secret needed for public-repo reads.
 
