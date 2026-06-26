@@ -97,6 +97,23 @@ def test_config_route_returns_repos_and_default():
     assert isinstance(body["gh_available"], bool)
 
 
+def test_config_folds_default_repo_into_picker_when_repos_empty():
+    """default_repo set + repos empty (a common config) must still give the picker a
+    selectable option — otherwise the board shows "nothing to select" though a repo is
+    configured."""
+    c = TestClient(_app({"repos": [], "default_repo": "o/solo"}))
+    body = c.get("/api/plugins/github/config").json()
+    assert body["repos"] == ["o/solo"]  # default surfaced as the selectable option
+    assert body["default_repo"] == "o/solo"
+
+
+def test_config_does_not_duplicate_default_already_in_repos():
+    c = TestClient(_app({"repos": ["o/a", "o/b"], "default_repo": "o/b"}))
+    body = c.get("/api/plugins/github/config").json()
+    assert body["repos"] == ["o/a", "o/b"]  # no dup; order preserved
+    assert body["default_repo"] == "o/b"
+
+
 def test_issues_route_proxies_fetch():
     fake = AsyncMock(return_value=(0, '[{"number":3,"title":"X"}]', ""))
     with patch("ghplugin.api.run_gh", fake):

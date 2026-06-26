@@ -121,9 +121,15 @@ def build_data_router(cfg: dict):
     @router.get("/config")
     async def _config() -> dict:
         repos = _repos(cfg)
+        default = effective_default_repo(cfg.get("default_repo", ""), repos)
+        # The picker is built from `repos`. A very common config sets `default_repo` but
+        # leaves `repos` empty — without folding the default in, the picker has zero
+        # options and the board shows "nothing to select" even though a repo IS configured.
+        # Surface the resolved default as a selectable option (first), deduped.
+        selectable = [default, *repos] if default and default not in repos else repos
         return {
-            "repos": repos,
-            "default_repo": effective_default_repo(cfg.get("default_repo", ""), repos),
+            "repos": selectable,
+            "default_repo": default,
             "gh_available": gh_available(),
         }
 
