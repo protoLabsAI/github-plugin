@@ -105,23 +105,29 @@ def build_view_router():
     return router
 
 
-def build_data_router(cfg: dict):
+def build_data_router(cfg):
     """The board's DATA routes — mounted under the GATED ``/api/plugins/github`` prefix.
 
-    Reads the plugin's own configured repo picker (no host coupling). ``/issue`` reuses
-    the SAME gate-checked `file_issue` path as the `/issue` chat command, so the dialog
-    and the command can never diverge.
+    ``cfg`` is either the config dict OR a zero-arg callable returning it. Pass a callable
+    (e.g. ``registry.live_config``) so the board reflects config edits WITHOUT a server
+    restart: a hot-reload can't re-mount this router, but reading the config per request
+    picks up the freshly-saved repos/default_repo. A plain dict (tests, older host) is a
+    fixed snapshot. ``/issue`` reuses the SAME gate-checked `file_issue` path as the
+    `/issue` chat command, so the dialog and the command can never diverge.
     """
     from fastapi import APIRouter, Body
 
     from .gh_issue import IssueRequest, effective_default_repo, file_issue, labels_for, resolve_repo
 
+    get_cfg = cfg if callable(cfg) else (lambda: cfg)
+
     router = APIRouter()
 
     @router.get("/config")
     async def _config() -> dict:
-        repos = _repos(cfg)
-        default = effective_default_repo(cfg.get("default_repo", ""), repos)
+        current = get_cfg()
+        repos = _repos(current)
+        default = effective_default_repo(current.get("default_repo", ""), repos)
         # The picker is built from `repos`. A very common config sets `default_repo` but
         # leaves `repos` empty — without folding the default in, the picker has zero
         # options and the board shows "nothing to select" even though a repo IS configured.
@@ -143,12 +149,13 @@ def build_data_router(cfg: dict):
 
     @router.post("/issue")
     async def _create_issue(body: dict = Body(...)) -> dict:
+        current = get_cfg()
         kind = (body.get("kind") or "generic").lower()
         if kind not in ("bug", "feature", "generic"):
             kind = "generic"
         title = (body.get("title") or "").strip()
         issue_body = (body.get("body") or "").strip()
-        repo = resolve_repo(body.get("repo"), effective_default_repo(cfg.get("default_repo", ""), _repos(cfg)))
+        repo = resolve_repo(body.get("repo"), effective_default_repo(current.get("default_repo", ""), _repos(current)))
         labels = labels_for(kind, [str(x) for x in (body.get("labels") or [])])
         dry_run = bool(body.get("dry_run"))
         if not title:

@@ -114,6 +114,21 @@ def test_config_does_not_duplicate_default_already_in_repos():
     assert body["default_repo"] == "o/b"
 
 
+def test_data_router_reads_config_live_from_a_getter():
+    """Given a config GETTER (callable), /config reflects edits per request — so a saved
+    repo shows in the board without a server restart (the mounted router can't re-mount)."""
+    from fastapi import FastAPI
+
+    live = {"repos": [], "default_repo": ""}
+    app = FastAPI()
+    app.include_router(build_data_router(lambda: live), prefix="/api/plugins/github")
+    c = TestClient(app)
+
+    assert c.get("/api/plugins/github/config").json()["repos"] == []  # nothing yet
+    live["repos"] = ["o/added"]  # operator saves a repo (config reloaded under us)
+    assert c.get("/api/plugins/github/config").json()["repos"] == ["o/added"]  # no restart
+
+
 def test_issues_route_proxies_fetch():
     fake = AsyncMock(return_value=(0, '[{"number":3,"title":"X"}]', ""))
     with patch("ghplugin.api.run_gh", fake):
