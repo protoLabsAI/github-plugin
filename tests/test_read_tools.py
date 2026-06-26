@@ -58,7 +58,7 @@ async def test_invalid_repo_returns_bad_repo_error():
     mock = AsyncMock(return_value=(0, "nope", ""))
     with patch("ghplugin.read_tools.run_gh", mock):
         result = await _read_file_tool().ainvoke({"repo": "bad", "path": "README.md"})
-    assert result.startswith("Error: 'repo' must be")
+    assert result.startswith("Error: no usable repo")
     mock.assert_not_called()
 
 
@@ -130,7 +130,7 @@ async def test_repo_contents_invalid_repo_returns_bad_repo_error():
     mock = AsyncMock(return_value=(0, "[]", ""))
     with patch("ghplugin.read_tools.run_gh", mock):
         result = await _repo_contents_tool().ainvoke({"repo": "bad", "path": ""})
-    assert result.startswith("Error: 'repo' must be")
+    assert result.startswith("Error: no usable repo")
     mock.assert_not_called()
 
 
@@ -146,3 +146,42 @@ async def test_repo_contents_bad_json_returns_parse_error():
     with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, "not json", ""))):
         result = await _repo_contents_tool().ainvoke({"repo": "owner/name", "path": ""})
     assert result.startswith("Error: could not parse gh output")
+
+
+# ── default_repo fallback (omit repo → use the configured default) ───────────────
+def _list_issues_tool(default_repo=""):
+    for t in get_read_tools(default_repo):
+        if t.name == "github_list_issues":
+            return t
+    raise AssertionError("github_list_issues tool not found")
+
+
+@pytest.mark.asyncio
+async def test_omitted_repo_uses_configured_default(monkeypatch):
+    """A tool called WITHOUT repo falls back to the factory's default_repo (#issue)."""
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    mock = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        await _list_issues_tool("owner/default").ainvoke({})  # no repo passed
+    argv = mock.call_args.args[0]
+    assert "--repo" in argv and "owner/default" in argv
+
+
+@pytest.mark.asyncio
+async def test_explicit_repo_overrides_default(monkeypatch):
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    mock = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        await _list_issues_tool("owner/default").ainvoke({"repo": "owner/explicit"})
+    argv = mock.call_args.args[0]
+    assert "owner/explicit" in argv and "owner/default" not in argv
+
+
+@pytest.mark.asyncio
+async def test_omitted_repo_no_default_errors(monkeypatch):
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    result = await _list_issues_tool("").ainvoke({})  # no repo, no default, no env
+    assert result.startswith("Error: no usable repo")

@@ -28,6 +28,7 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from .gh_cli import bad_repo, check_gh_error, run_gh
+from .gh_issue import resolve_repo
 
 
 def _csv(value: str) -> list[str]:
@@ -35,19 +36,23 @@ def _csv(value: str) -> list[str]:
     return [tok.strip() for tok in (value or "").split(",") if tok.strip()]
 
 
-def get_write_tools() -> list:
+def get_write_tools(default_repo: str = "") -> list:
+    """Build the write tools. ``default_repo`` (``owner/name``) is used whenever a tool's
+    ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it."""
+
     @tool
-    async def github_create_issue(repo: str, title: str, body: str = "", labels: str = "") -> str:
+    async def github_create_issue(title: str, repo: str = "", body: str = "", labels: str = "") -> str:
         """Create a GitHub issue.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             title: Issue title.
             body: Issue body (Markdown).
             labels: Optional comma-separated label names.
 
         Returns the new issue URL.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         args = ["issue", "create", "--repo", repo, "--title", title, "--body", body]
@@ -61,16 +66,17 @@ def get_write_tools() -> list:
         return out.strip()
 
     @tool
-    async def github_comment(repo: str, number: int, body: str) -> str:
+    async def github_comment(number: int, body: str, repo: str = "") -> str:
         """Add a comment to a GitHub issue or pull request.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: Issue or PR number (a PR is an issue for commenting).
             body: The comment body (Markdown).
 
         Returns the new comment URL.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         args = ["issue", "comment", str(number), "--repo", repo, "--body", body]
@@ -80,11 +86,11 @@ def get_write_tools() -> list:
         return out.strip()
 
     @tool
-    async def github_create_pr(repo: str, head: str, title: str, body: str = "", base: str = "main") -> str:
+    async def github_create_pr(head: str, title: str, repo: str = "", body: str = "", base: str = "main") -> str:
         """Open a pull request.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             head: The branch with the changes.
             title: PR title.
             body: PR body (Markdown).
@@ -92,6 +98,7 @@ def get_write_tools() -> list:
 
         Returns the new PR URL.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         args = [
@@ -114,11 +121,11 @@ def get_write_tools() -> list:
         return out.strip()
 
     @tool
-    async def github_edit_pr(repo: str, number: int, title: str = "", body: str = "", state: str = "") -> str:
+    async def github_edit_pr(number: int, repo: str = "", title: str = "", body: str = "", state: str = "") -> str:
         """Edit a pull request's title/body and/or its draft state.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: PR number.
             title: New title (omit to leave unchanged).
             body: New body / description (omit to leave unchanged).
@@ -127,6 +134,7 @@ def get_write_tools() -> list:
 
         Returns the PR URL (or a short summary of what changed).
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         if not (title or body or state):
@@ -154,8 +162,8 @@ def get_write_tools() -> list:
 
     @tool
     async def github_merge_pr(
-        repo: str,
         number: int,
+        repo: str = "",
         method: str = "squash",
         delete_branch: bool = False,
         dry_run: bool = False,
@@ -164,7 +172,7 @@ def get_write_tools() -> list:
         """Merge a pull request. IRREVERSIBLE — guarded.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: PR number.
             method: ``squash`` (default), ``merge``, or ``rebase``.
             delete_branch: Delete the head branch after merging (default False).
@@ -174,6 +182,7 @@ def get_write_tools() -> list:
 
         Returns the merge result, a dry-run preview, or a refusal asking for confirm.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         if method not in ("squash", "merge", "rebase"):
@@ -197,11 +206,13 @@ def get_write_tools() -> list:
         return out.strip() or f"Merged PR #{number} in {repo} via {method}."
 
     @tool
-    async def github_close(repo: str, number: int, kind: str = "issue", reopen: bool = False, comment: str = "") -> str:
+    async def github_close(
+        number: int, repo: str = "", kind: str = "issue", reopen: bool = False, comment: str = ""
+    ) -> str:
         """Close (or reopen) an issue or pull request.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: Issue or PR number.
             kind: ``issue`` (default) or ``pr`` — they use different gh subcommands.
             reopen: If true, reopen instead of close.
@@ -209,6 +220,7 @@ def get_write_tools() -> list:
 
         Returns a short confirmation.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         if kind not in ("issue", "pr"):
@@ -223,11 +235,13 @@ def get_write_tools() -> list:
         return out.strip() or f"{'Reopened' if reopen else 'Closed'} {kind} #{number} in {repo}."
 
     @tool
-    async def github_set_labels(repo: str, number: int, add: str = "", remove: str = "", kind: str = "issue") -> str:
+    async def github_set_labels(
+        number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
+    ) -> str:
         """Add and/or remove labels on an issue or pull request.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: Issue or PR number.
             add: Comma-separated label names to add.
             remove: Comma-separated label names to remove.
@@ -235,6 +249,7 @@ def get_write_tools() -> list:
 
         Returns a short confirmation.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         if kind not in ("issue", "pr"):
@@ -253,11 +268,13 @@ def get_write_tools() -> list:
         return out.strip() or f"Updated labels on {kind} #{number} in {repo}."
 
     @tool
-    async def github_set_assignees(repo: str, number: int, add: str = "", remove: str = "", kind: str = "issue") -> str:
+    async def github_set_assignees(
+        number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
+    ) -> str:
         """Add and/or remove assignees on an issue or pull request.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: Issue or PR number.
             add: Comma-separated GitHub usernames to assign.
             remove: Comma-separated GitHub usernames to unassign.
@@ -265,6 +282,7 @@ def get_write_tools() -> list:
 
         Returns a short confirmation.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         if kind not in ("issue", "pr"):

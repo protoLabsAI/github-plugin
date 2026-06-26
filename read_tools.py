@@ -2,8 +2,9 @@
 
 Six are ported from protoAgent's tools/github_tools.py (PRs, issues, diffs, CI). Two
 new ones (`github_read_file`, `github_repo_contents`) are STUBBED — the team builds
-them out (see the TODOs). Each tool requires an explicit `owner/name` repo and
-degrades to a readable `Error: ...` string when `gh`/auth is unavailable.
+them out (see the TODOs). Each tool takes an `owner/name` repo — or falls back to the
+configured default when it's omitted — and degrades to a readable `Error: ...` string
+when `gh`/auth is unavailable.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import re
 from langchain_core.tools import tool
 
 from .gh_cli import bad_repo, check_gh_error, run_gh
+from .gh_issue import resolve_repo
 
 # Error-relevant lines to surface from a failed CI log (github_run_failure).
 _CI_ERR_RE = re.compile(
@@ -23,15 +25,19 @@ _CI_ERR_RE = re.compile(
 )
 
 
-def get_read_tools() -> list:
+def get_read_tools(default_repo: str = "") -> list:
+    """Build the read tools. ``default_repo`` (``owner/name``) is used whenever a tool's
+    ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it."""
+
     @tool
-    async def github_get_pr(repo: str, number: int) -> str:
+    async def github_get_pr(number: int, repo: str = "") -> str:
         """Fetch a GitHub pull request: title, state, author, body, and changed files.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: PR number.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         rc, out, serr = await run_gh(
@@ -60,13 +66,14 @@ def get_read_tools() -> list:
         )
 
     @tool
-    async def github_get_issue(repo: str, number: int) -> str:
+    async def github_get_issue(number: int, repo: str = "") -> str:
         """Fetch a GitHub issue: title, state, author, labels, and body.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: Issue number.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         rc, out, serr = await run_gh(
@@ -86,14 +93,15 @@ def get_read_tools() -> list:
         )
 
     @tool
-    async def github_list_issues(repo: str, state: str = "open", limit: int = 20) -> str:
+    async def github_list_issues(repo: str = "", state: str = "open", limit: int = 20) -> str:
         """List GitHub issues for a repo.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             state: ``open`` | ``closed`` | ``all`` (default ``open``).
             limit: Max issues to return (1-50, default 20).
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         if state not in ("open", "closed", "all"):
@@ -130,14 +138,15 @@ def get_read_tools() -> list:
         return "\n".join(lines)
 
     @tool
-    async def github_get_commit_diff(repo: str, ref: str, max_chars: int = 8000) -> str:
+    async def github_get_commit_diff(ref: str, repo: str = "", max_chars: int = 8000) -> str:
         """Fetch a commit's metadata + unified diff.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             ref: Commit SHA (or ref) to inspect.
             max_chars: Truncate the diff at this many characters (default 8000).
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         rc, out, serr = await run_gh(
@@ -153,16 +162,17 @@ def get_read_tools() -> list:
         return f"Commit {repo}@{ref}:\n\n{diff}"
 
     @tool
-    async def github_ci_runs(repo: str, branch: str = "", limit: int = 15) -> str:
+    async def github_ci_runs(repo: str = "", branch: str = "", limit: int = 15) -> str:
         """List recent GitHub Actions runs for a repo — for CI triage.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             branch: Optional branch filter (e.g. ``main``).
             limit: Max runs to return (capped at 50).
 
         Feed a failing run's id to ``github_run_failure`` to see why it failed.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         args = [
@@ -194,14 +204,15 @@ def get_read_tools() -> list:
         return f"{repo} — {len(runs)} recent run(s):\n" + "\n".join(lines)
 
     @tool
-    async def github_run_failure(repo: str, run_id: int, max_lines: int = 40) -> str:
+    async def github_run_failure(run_id: int, repo: str = "", max_lines: int = 40) -> str:
         """Explain why a GitHub Actions run failed — the error lines from its failed steps.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             run_id: The run id (``databaseId`` from ``github_ci_runs``).
             max_lines: Cap on error lines returned (capped at 80).
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         cap = max(5, min(int(max_lines), 80))
@@ -226,11 +237,11 @@ def get_read_tools() -> list:
     # ── NEW read tools — STUBBED. Build these out (this is what lets an agent research
     # any repo over `gh` without registering an fs project per repo). ────────────────
     @tool
-    async def github_read_file(repo: str, path: str, ref: str = "") -> str:
+    async def github_read_file(path: str, repo: str = "", ref: str = "") -> str:
         """Read a single file's contents from a GitHub repo.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             path: Path to the file within the repo (e.g. ``docs/guide.md``).
             ref: Optional branch / tag / SHA (default: the repo's default branch).
 
@@ -239,6 +250,7 @@ def get_read_tools() -> list:
         `gh api .../contents/... --jq .content | base64 -d`. Validate repo with
         bad_repo(); cap the returned size; return a readable Error on failure.
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         args = ["api", f"repos/{repo}/contents/{path}", "-H", "Accept: application/vnd.github.raw+json"]
@@ -252,14 +264,15 @@ def get_read_tools() -> list:
         return out
 
     @tool
-    async def github_repo_contents(repo: str, path: str = "", ref: str = "") -> str:
+    async def github_repo_contents(repo: str = "", path: str = "", ref: str = "") -> str:
         """List the contents (files + dirs) of a path in a GitHub repo.
 
         Args:
-            repo: Repository as ``owner/name`` (required, no default).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             path: Directory path within the repo (default: repo root).
             ref: Optional branch / tag / SHA (default: the repo's default branch).
         """
+        repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         args = ["api", f"repos/{repo}/contents/{path}" if path else f"repos/{repo}/contents"]

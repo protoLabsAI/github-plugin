@@ -25,7 +25,8 @@ def bad_repo(repo: str) -> str | None:
     """Validate an `owner/name` repo slug; return an Error string if invalid, else None."""
     if not repo or not REPO_RE.match(repo):
         return (
-            f"Error: 'repo' must be 'owner/name' (got {repo!r}). Pass it explicitly — there is no default repository."
+            f"Error: no usable repo (got {repo!r}). Pass repo='owner/name', or set a default "
+            "in Settings ▸ GitHub (github.default_repo / repos) so it can be omitted."
         )
     return None
 

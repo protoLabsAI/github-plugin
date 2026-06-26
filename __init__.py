@@ -32,12 +32,19 @@ def register(registry) -> None:
     cfg = registry.config or {}
     write_enabled = bool(cfg.get("write", False))
 
+    # The default repo the tools fall back to when their `repo` arg is omitted — the
+    # configured `default_repo`, else the first of `repos` (same resolution as /issue and
+    # the board). Tools are rebuilt on a config reload, so capturing it here is live enough.
+    from .gh_issue import effective_default_repo
+
+    default_repo = effective_default_repo(cfg.get("default_repo", ""), cfg.get("repos", []))
+
     # READ tools — always available (they return an error string if `gh`/auth is missing).
     n_read = 0
     try:
         from .read_tools import get_read_tools
 
-        read = get_read_tools()
+        read = get_read_tools(default_repo)
         for t in read:
             registry.register_tool(t)
         n_read = len(read)
@@ -50,7 +57,7 @@ def register(registry) -> None:
         try:
             from .write_tools import get_write_tools
 
-            write = get_write_tools()
+            write = get_write_tools(default_repo)
             for t in write:
                 registry.register_tool(t)
             n_write = len(write)
@@ -63,9 +70,7 @@ def register(registry) -> None:
     issue_cmd = False
     if hasattr(registry, "register_chat_command"):
         try:
-            from .gh_issue import effective_default_repo, run_issue_command
-
-            default_repo = effective_default_repo(cfg.get("default_repo", ""), cfg.get("repos", []))
+            from .gh_issue import run_issue_command
 
             async def _issue(rest: str, session_id: str) -> str:
                 """File a GitHub issue (user-only). Usage: /issue <title> [--bug|--feature] [--repo owner/name]."""
