@@ -1,6 +1,6 @@
 [project]
 name = "github-plugin"
-version = "0.1.1"
+version = "0.1.2"
 description = "Read/write GitHub tools for protoAgent over the gh CLI, with per-agent write gating."
 requires-python = ">=3.11"
 
