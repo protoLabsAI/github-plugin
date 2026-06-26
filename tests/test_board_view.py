@@ -97,6 +97,38 @@ def test_config_route_returns_repos_and_default():
     assert isinstance(body["gh_available"], bool)
 
 
+def test_config_folds_default_repo_into_picker_when_repos_empty():
+    """default_repo set + repos empty (a common config) must still give the picker a
+    selectable option — otherwise the board shows "nothing to select" though a repo is
+    configured."""
+    c = TestClient(_app({"repos": [], "default_repo": "o/solo"}))
+    body = c.get("/api/plugins/github/config").json()
+    assert body["repos"] == ["o/solo"]  # default surfaced as the selectable option
+    assert body["default_repo"] == "o/solo"
+
+
+def test_config_does_not_duplicate_default_already_in_repos():
+    c = TestClient(_app({"repos": ["o/a", "o/b"], "default_repo": "o/b"}))
+    body = c.get("/api/plugins/github/config").json()
+    assert body["repos"] == ["o/a", "o/b"]  # no dup; order preserved
+    assert body["default_repo"] == "o/b"
+
+
+def test_data_router_reads_config_live_from_a_getter():
+    """Given a config GETTER (callable), /config reflects edits per request — so a saved
+    repo shows in the board without a server restart (the mounted router can't re-mount)."""
+    from fastapi import FastAPI
+
+    live = {"repos": [], "default_repo": ""}
+    app = FastAPI()
+    app.include_router(build_data_router(lambda: live), prefix="/api/plugins/github")
+    c = TestClient(app)
+
+    assert c.get("/api/plugins/github/config").json()["repos"] == []  # nothing yet
+    live["repos"] = ["o/added"]  # operator saves a repo (config reloaded under us)
+    assert c.get("/api/plugins/github/config").json()["repos"] == ["o/added"]  # no restart
+
+
 def test_issues_route_proxies_fetch():
     fake = AsyncMock(return_value=(0, '[{"number":3,"title":"X"}]', ""))
     with patch("ghplugin.api.run_gh", fake):

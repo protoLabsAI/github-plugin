@@ -86,7 +86,12 @@ def register(registry) -> None:
             from .api import build_data_router, build_view_router
 
             registry.register_router(build_view_router(), prefix="/plugins/github")
-            registry.register_router(build_data_router(cfg), prefix="/api/plugins/github")
+            # Pass a LIVE config getter when the host offers one (registry.live_config),
+            # so a repo/default_repo edit shows in the board with no server restart — a
+            # hot-reload can't re-mount this router, but reading config per request does.
+            # Older hosts (no live_config) fall back to the register-time snapshot.
+            get_cfg = registry.live_config if hasattr(registry, "live_config") else cfg
+            registry.register_router(build_data_router(get_cfg), prefix="/api/plugins/github")
             view = True
         except Exception:  # noqa: BLE001
             log.exception("[github] registering the board view failed")
