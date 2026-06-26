@@ -39,6 +39,7 @@ def _csv(value: str) -> list[str]:
 def get_write_tools(default_repo: str = "") -> list:
     """Build the write tools. ``default_repo`` (``owner/name``) is used whenever a tool's
     ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it."""
+
     @tool
     async def github_create_issue(title: str, repo: str = "", body: str = "", labels: str = "") -> str:
         """Create a GitHub issue.
@@ -205,7 +206,9 @@ def get_write_tools(default_repo: str = "") -> list:
         return out.strip() or f"Merged PR #{number} in {repo} via {method}."
 
     @tool
-    async def github_close(number: int, repo: str = "", kind: str = "issue", reopen: bool = False, comment: str = "") -> str:
+    async def github_close(
+        number: int, repo: str = "", kind: str = "issue", reopen: bool = False, comment: str = ""
+    ) -> str:
         """Close (or reopen) an issue or pull request.
 
         Args:
@@ -232,7 +235,9 @@ def get_write_tools(default_repo: str = "") -> list:
         return out.strip() or f"{'Reopened' if reopen else 'Closed'} {kind} #{number} in {repo}."
 
     @tool
-    async def github_set_labels(number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue") -> str:
+    async def github_set_labels(
+        number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
+    ) -> str:
         """Add and/or remove labels on an issue or pull request.
 
         Args:
@@ -263,7 +268,9 @@ def get_write_tools(default_repo: str = "") -> list:
         return out.strip() or f"Updated labels on {kind} #{number} in {repo}."
 
     @tool
-    async def github_set_assignees(number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue") -> str:
+    async def github_set_assignees(
+        number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
+    ) -> str:
         """Add and/or remove assignees on an issue or pull request.
 
         Args:

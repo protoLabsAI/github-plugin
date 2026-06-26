@@ -2,8 +2,9 @@
 
 Six are ported from protoAgent's tools/github_tools.py (PRs, issues, diffs, CI). Two
 new ones (`github_read_file`, `github_repo_contents`) are STUBBED — the team builds
-them out (see the TODOs). Each tool requires an explicit `owner/name` repo and
-degrades to a readable `Error: ...` string when `gh`/auth is unavailable.
+them out (see the TODOs). Each tool takes an `owner/name` repo — or falls back to the
+configured default when it's omitted — and degrades to a readable `Error: ...` string
+when `gh`/auth is unavailable.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ _CI_ERR_RE = re.compile(
 def get_read_tools(default_repo: str = "") -> list:
     """Build the read tools. ``default_repo`` (``owner/name``) is used whenever a tool's
     ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it."""
+
     @tool
     async def github_get_pr(number: int, repo: str = "") -> str:
         """Fetch a GitHub pull request: title, state, author, body, and changed files.
