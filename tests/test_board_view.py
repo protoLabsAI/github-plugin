@@ -89,6 +89,16 @@ def test_board_page_is_read_only():
     assert "/api/plugins/github/issues" in PAGE and "/api/plugins/github/prs" in PAGE  # reads only
 
 
+def test_pages_boot_once():
+    """#13 regression — each page boots via the kit ONCE. A second direct ``boot();`` ran two
+    overlapping config+load sequences → the list flicker/thrash on mount."""
+    from ghplugin.view import NEW_ISSUE_PAGE, PAGE
+
+    for page in (PAGE, NEW_ISSUE_PAGE):
+        assert "kit.initPluginView(boot)" in page  # booted via the handshake callback
+        assert "boot();" not in page  # …and NOT also called directly
+
+
 def test_config_route_returns_repos_and_default():
     c = TestClient(_app())
     body = c.get("/api/plugins/github/config").json()

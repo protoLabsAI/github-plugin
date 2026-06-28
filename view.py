@@ -101,7 +101,12 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       + ' '+labelPills(it.labels)+'</div></a>';
   }
 
+  // A monotonic token so an in-flight load() whose fetch resolves AFTER a newer load()
+  // started (rapid tab/filter clicks, or any double-trigger) drops its stale result instead
+  // of clobbering the fresh list — no thrash.
+  let loadSeq = 0;
   async function load(){
+    const my = ++loadSeq;
     const repo = $("repo").value, list = $("list");
     if(!repo){ list.innerHTML = '<div class="hint">No repositories configured. Add some under <b>Settings ▸ GitHub</b> (github.repos).</div>'; return; }
     list.innerHTML = '<div class="hint">Loading…</div>';
@@ -109,11 +114,12 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       + "?repo="+encodeURIComponent(repo)+"&state="+encodeURIComponent($("state").value);
     try {
       const data = await kit.apiFetch(path).then(r => r.json());
+      if(my !== loadSeq) return;  // a newer load() superseded this one — drop the stale result
       if(data.error){ list.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
       const items = data.items||[];
       if(!items.length){ list.innerHTML = '<div class="empty">No '+tab+' for this filter.</div>'; return; }
       list.innerHTML = items.map(tab==="issues"?issueRow:prRow).join("");
-    } catch(e){ list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
+    } catch(e){ if(my===loadSeq) list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
   }
 
   async function boot(){
@@ -128,8 +134,10 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   $("t-issues").onclick = () => setTab("issues");
   $("t-prs").onclick = () => setTab("prs");
   $("repo").onchange = load; $("state").onchange = load; $("refresh").onclick = load;
+  // Boot ONCE — via the kit so it runs after the theme/auth handshake (the fallback kit calls
+  // it immediately). A second direct boot() here caused two overlapping config+load sequences
+  // → the list flicker/thrash on mount (#13).
   kit.initPluginView(boot);
-  boot();
 </script></body></html>"""
 
 
@@ -195,6 +203,6 @@ NEW_ISSUE_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     } catch(e){ $("res").textContent = "Request failed."; }
   }
   $("submit").onclick = submit;
+  // Boot ONCE via the kit (after the theme/auth handshake) — not also directly (#13).
   kit.initPluginView(boot);
-  boot();
 </script></body></html>"""
