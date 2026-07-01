@@ -33,13 +33,16 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   html,body{margin:0;height:100%;background:var(--pl-color-bg-raised);color:var(--pl-color-fg);
     font-family:var(--pl-font-sans,ui-sans-serif,system-ui,sans-serif);font-size:13px}
   #wrap{display:flex;flex-direction:column;height:100%;min-height:0}
-  .bar{display:flex;align-items:center;gap:8px;padding:8px 10px;flex-wrap:wrap;
+  .bar{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;
     border-bottom:var(--pl-border-width,1px) solid var(--pl-color-border)}
   .tabs{display:inline-flex;border:1px solid var(--pl-color-border);border-radius:var(--pl-radius,8px);overflow:hidden}
-  .tab{padding:5px 12px;cursor:pointer;background:transparent;border:0;color:var(--pl-color-fg-muted);font-size:12px}
+  .tab{padding:4px 11px;cursor:pointer;background:transparent;border:0;color:var(--pl-color-fg-muted);
+    font-size:12px;line-height:1.6;white-space:nowrap}
   .tab[aria-selected="true"]{background:var(--pl-color-bg);color:var(--pl-color-fg);font-weight:600}
   select{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
-    border-radius:var(--pl-radius,8px);padding:4px 6px;font-size:12px;max-width:240px}
+    border-radius:var(--pl-radius,8px);padding:4px 6px;font-size:12px;max-width:220px}
+  .ico{width:1em;height:1em;flex:none;vertical-align:-0.15em}
+  #refresh{display:inline-flex;align-items:center;justify-content:center;padding:4px 7px;color:var(--pl-color-fg-muted)}
   .spacer{flex:1}
   #list{flex:1;min-height:0;overflow:auto;padding:4px 0}
   .row{display:block;text-decoration:none;color:inherit;padding:9px 12px;
@@ -51,6 +54,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .title{font-weight:600;line-height:1.35}
   .num{color:var(--pl-color-fg-muted);font-weight:400}
   .meta{margin-top:3px;font-size:11px;color:var(--pl-color-fg-muted);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .cmt{display:inline-flex;align-items:center;gap:3px}
   .pill{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--pl-color-border)}
   .empty,.hint{padding:24px 14px;text-align:center;color:var(--pl-color-fg-muted)}
 </style></head><body>
@@ -58,12 +62,12 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="bar">
     <select id="repo" title="Repository"></select>
     <div class="tabs" role="tablist">
-      <button class="tab" id="t-issues" role="tab" aria-selected="true">Issues</button>
-      <button class="tab" id="t-prs" role="tab" aria-selected="false">Pull Requests</button>
+      <button class="tab" id="t-issues" role="tab" aria-selected="true" title="Issues">Issues</button>
+      <button class="tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests">PRs</button>
     </div>
     <select id="state" title="State"><option value="open">Open</option><option value="closed">Closed</option><option value="all">All</option></select>
     <span class="spacer"></span>
-    <button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh">↻</button>
+    <button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>
   </div>
   <div id="list"><div class="hint">Loading…</div></div>
 </div>
@@ -77,17 +81,26 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   let tab = "issues";
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
   const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}); } catch(e){ return ""; } };
+  // Inline Lucide (v0.468) SVGs — themed via currentColor, no runtime dep / kit icon API.
+  const svg = (paths) => '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+paths+'</svg>';
+  const ICON = {
+    comment: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+    refresh: svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
+  };
 
   function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); load(); }
   function labelPills(labels){ return (labels||[]).slice(0,5).map(l => '<span class="pill">'+esc(l.name||l)+'</span>').join(" "); }
 
   function issueRow(it){
     const st = (it.state||"").toLowerCase();
+    // `gh issue list --json comments` returns an ARRAY of comment objects, not a count —
+    // rendering it directly was the "[object Object]" bug (#16). Show its length.
+    const cc = Array.isArray(it.comments) ? it.comments.length : (Number(it.comments)||0);
     return '<a class="row" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
       + '<div class="top"><span class="dot '+(st==="closed"?"closed":"open")+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
       + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+fmtDate(it.createdAt)+'</span>'
-      + (it.comments?('<span>💬 '+esc(it.comments)+'</span>'):'')+' '+labelPills(it.labels)+'</div></a>';
+      + (cc?('<span class="cmt" title="'+esc(cc)+' comment'+(cc===1?'':'s')+'">'+ICON.comment+esc(cc)+'</span>'):'')+' '+labelPills(it.labels)+'</div></a>';
   }
   function prRow(it){
     const merged = (it.state||"").toLowerCase()==="merged", draft = !!it.isDraft;
@@ -122,7 +135,10 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     } catch(e){ if(my===loadSeq) list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
   }
 
+  let booted = false;
   async function boot(){
+    if (booted) return;  // the kit re-fires this on every re-theme + the handshake re-send;
+    booted = true;       // build the picker and first-load EXACTLY once, or the list thrashes (#15).
     let cfg = { repos: [], default_repo: "" };
     try { cfg = await kit.apiFetch("/api/plugins/github/config").then(r => r.json()); } catch(e){}
     const sel = $("repo");
@@ -131,12 +147,14 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     load();
   }
 
+  $("refresh").innerHTML = ICON.refresh;
   $("t-issues").onclick = () => setTab("issues");
   $("t-prs").onclick = () => setTab("prs");
   $("repo").onchange = load; $("state").onchange = load; $("refresh").onclick = load;
-  // Boot ONCE — via the kit so it runs after the theme/auth handshake (the fallback kit calls
-  // it immediately). A second direct boot() here caused two overlapping config+load sequences
-  // → the list flicker/thrash on mount (#13).
+  // Boot via the kit so it runs after the theme/auth handshake (the fallback kit calls it
+  // immediately). initPluginView's callback fires on the initial init AND every re-theme, so
+  // boot() itself is guarded (booted) to run once — that's what actually kills the mount
+  // thrash; a second direct boot() call was removed in #13.
   kit.initPluginView(boot);
 </script></body></html>"""
 
@@ -182,7 +200,10 @@ NEW_ISSUE_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
+  let booted = false;
   async function boot(){
+    if (booted) return;  // kit re-fires on every re-theme; populate the picker once so it never
+    booted = true;       // clobbers an in-progress repo selection (#15).
     let cfg = { repos: [], default_repo: "" };
     try { cfg = await kit.apiFetch("/api/plugins/github/config").then(r => r.json()); } catch(e){}
     $("repo").innerHTML = (cfg.repos||[]).map(r => '<option value="'+esc(r)+'">'+esc(r)+'</option>').join("");
