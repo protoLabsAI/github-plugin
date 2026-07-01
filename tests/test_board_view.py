@@ -99,6 +99,38 @@ def test_pages_boot_once():
         assert "boot();" not in page  # …and NOT also called directly
 
 
+def test_pages_boot_is_idempotent():
+    """#15 — the kit's ``initPluginView`` callback fires on the initial init AND on every
+    re-theme (plus the handshake re-send), so ``boot`` must guard itself to run exactly once.
+    'Boot once' at the call site (#13) wasn't enough — the single callback fires repeatedly,
+    each run rebuilding the picker + re-loading → the list flicker/thrash returned."""
+    from ghplugin.view import NEW_ISSUE_PAGE, PAGE
+
+    for page in (PAGE, NEW_ISSUE_PAGE):
+        assert "if (booted) return;" in page  # the callback is guarded, not just called once
+
+
+def test_board_renders_comment_count_not_the_array():
+    """#16 — ``gh issue list --json comments`` returns an ARRAY of comment objects; the board
+    must render its COUNT (``.length``), not ``String(array)`` which shows '[object Object]'."""
+    from ghplugin.view import PAGE
+
+    assert "it.comments.length" in PAGE  # the count, not the raw array
+    assert "esc(it.comments)" not in PAGE  # the old object-stringifying render is gone
+    assert "💬" not in PAGE  # emoji swapped for a Lucide icon
+    assert '<svg class="ico"' in PAGE  # inline Lucide icon markup present
+
+
+def test_board_heading_uses_icon_actions():
+    """#16 follow-up + heading tightening — the refresh action is a Lucide icon (not the raw
+    glyph) and the pull-request tab is the compact 'PRs'."""
+    from ghplugin.view import PAGE
+
+    assert "↻" not in PAGE  # raw refresh glyph replaced by the Lucide refresh-cw icon
+    assert "ICON.refresh" in PAGE  # …set from the shared icon set
+    assert ">PRs<" in PAGE  # tightened tab label
+
+
 def test_config_route_returns_repos_and_default():
     c = TestClient(_app())
     body = c.get("/api/plugins/github/config").json()

@@ -2,7 +2,7 @@
 # Keep `version` in lockstep with pyproject.toml (tests/test_version.py asserts it).
 id: github
 name: GitHub (read/write tools)
-version: 0.1.3
+version: 0.1.4
 description: >-
   Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
   read tools (PRs, issues, diffs, CI, repo files/contents) are always on; the write
