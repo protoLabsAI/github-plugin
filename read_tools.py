@@ -31,7 +31,7 @@ def get_read_tools(default_repo: str = "") -> list:
 
     @tool
     async def github_get_pr(number: int, repo: str = "") -> str:
-        """Fetch a GitHub pull request: title, state, author, body, and changed files.
+        """Fetch a GitHub pull request: title, state, author, body, branch, and changed files.
 
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
@@ -48,7 +48,7 @@ def get_read_tools(default_repo: str = "") -> list:
                 "--repo",
                 repo,
                 "--json",
-                "number,title,state,author,body,additions,deletions,files,url",
+                "number,title,state,author,body,additions,deletions,files,url,headRefName,baseRefName",
             ]
         )
         if gh_err := check_gh_error(rc, serr):
@@ -60,6 +60,7 @@ def get_read_tools(default_repo: str = "") -> list:
         files = ", ".join(f.get("path", "?") for f in (d.get("files") or [])[:20])
         return (
             f"PR #{d.get('number')} [{d.get('state')}] {d.get('title')}\n"
+            f"branch: {d.get('headRefName', '?')} -> {d.get('baseRefName', '?')}\n"
             f"by {(d.get('author') or {}).get('login', '?')} | "
             f"+{d.get('additions', 0)}/-{d.get('deletions', 0)} | {d.get('url')}\n"
             f"files: {files or '(none)'}\n\n{(d.get('body') or '').strip()[:2000]}"

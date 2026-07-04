@@ -148,6 +148,54 @@ async def test_repo_contents_bad_json_returns_parse_error():
     assert result.startswith("Error: could not parse gh output")
 
 
+# ── github_get_pr: the head branch must be readable, not guessed ─────────────────
+# A consumer that wants a file FROM the PR (github_read_file/github_repo_contents,
+# both `ref`-keyed) has no other way to learn the real branch name — omitting it
+# here means the caller has to guess one from the PR title, which is exactly how
+# a real PR lookup once 404'd (guessed "proto/feature/<slug-of-title>" instead of
+# the actual "feat/bd-3a4").
+def _get_pr_tool():
+    for t in get_read_tools():
+        if t.name == "github_get_pr":
+            return t
+    raise AssertionError("github_get_pr tool not found")
+
+
+_PR_JSON = json.dumps(
+    {
+        "number": 38,
+        "title": "feat: fix the ephemeral label",
+        "state": "OPEN",
+        "author": {"login": "roxy"},
+        "body": "fixed it",
+        "additions": 10,
+        "deletions": 2,
+        "files": [{"path": "view.py"}],
+        "url": "https://github.com/owner/name/pull/38",
+        "headRefName": "feat/bd-3a4",
+        "baseRefName": "main",
+    }
+)
+
+
+@pytest.mark.asyncio
+async def test_get_pr_requests_head_and_base_ref():
+    mock = AsyncMock(return_value=(0, _PR_JSON, ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 38})
+    args = mock.call_args.args[0]
+    json_arg = args[args.index("--json") + 1]
+    assert "headRefName" in json_arg
+    assert "baseRefName" in json_arg
+
+
+@pytest.mark.asyncio
+async def test_get_pr_surfaces_the_branch_in_its_output():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, _PR_JSON, ""))):
+        result = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 38})
+    assert "feat/bd-3a4 -> main" in result
+
+
 # ── default_repo fallback (omit repo → use the configured default) ───────────────
 def _list_issues_tool(default_repo=""):
     for t in get_read_tools(default_repo):
