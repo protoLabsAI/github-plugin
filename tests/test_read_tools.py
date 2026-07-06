@@ -196,6 +196,57 @@ async def test_get_pr_surfaces_the_branch_in_its_output():
     assert "feat/bd-3a4 -> main" in result
 
 
+# ── github_pr_diff (the review workflow's diff source) ───────────────────────────
+def _pr_diff_tool(default_repo=""):
+    for t in get_read_tools(default_repo):
+        if t.name == "github_pr_diff":
+            return t
+    raise AssertionError("github_pr_diff tool not found")
+
+
+@pytest.mark.asyncio
+async def test_pr_diff_returns_diff_via_gh_pr_diff():
+    mock = AsyncMock(return_value=(0, "diff --git a/x b/x\n+added", ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        result = await _pr_diff_tool().ainvoke({"repo": "owner/name", "number": 42})
+    argv = mock.call_args.args[0]
+    assert argv[:3] == ["pr", "diff", "42"]
+    assert "--repo" in argv and "owner/name" in argv
+    assert "diff --git a/x b/x" in result
+    assert result.startswith("PR owner/name#42 diff:")
+
+
+@pytest.mark.asyncio
+async def test_pr_diff_truncates_at_max_chars():
+    mock = AsyncMock(return_value=(0, "x" * 500, ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        result = await _pr_diff_tool().ainvoke({"repo": "owner/name", "number": 1, "max_chars": 100})
+    assert "truncated at 100 chars" in result
+
+
+@pytest.mark.asyncio
+async def test_pr_diff_empty_returns_note():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, "  ", ""))):
+        result = await _pr_diff_tool().ainvoke({"repo": "owner/name", "number": 7})
+    assert "No diff for owner/name#7" in result
+
+
+@pytest.mark.asyncio
+async def test_pr_diff_invalid_repo_returns_bad_repo_error():
+    mock = AsyncMock(return_value=(0, "nope", ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        result = await _pr_diff_tool().ainvoke({"repo": "bad", "number": 1})
+    assert result.startswith("Error:")
+    mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pr_diff_gh_error_is_surfaced():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "gh: not found"))):
+        result = await _pr_diff_tool().ainvoke({"repo": "owner/name", "number": 1})
+    assert result.startswith("Error")
+
+
 # ── default_repo fallback (omit repo → use the configured default) ───────────────
 def _list_issues_tool(default_repo=""):
     for t in get_read_tools(default_repo):
