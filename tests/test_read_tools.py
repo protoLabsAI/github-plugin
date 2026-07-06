@@ -284,3 +284,33 @@ async def test_omitted_repo_no_default_errors(monkeypatch):
     monkeypatch.delenv("GH_REPO", raising=False)
     result = await _list_issues_tool("").ainvoke({})  # no repo, no default, no env
     assert result.startswith("Error: no usable repo")
+
+
+# ── github_path_exists: the EXISTS/MISSING grounding probe (ADR 0078) ───────────
+def _path_exists_tool():
+    for t in get_read_tools():
+        if t.name == "github_path_exists":
+            return t
+    raise AssertionError("github_path_exists tool not found")
+
+
+@pytest.mark.asyncio
+async def test_path_exists_reports_exists():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, "{}", ""))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "packages/x"})
+    assert out.startswith("EXISTS: owner/name/packages/x")
+
+
+@pytest.mark.asyncio
+async def test_path_exists_reports_missing_on_404():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "HTTP 404: Not Found"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "gone.txt", "ref": "main"})
+    assert out.startswith("MISSING: owner/name/gone.txt @ main")
+
+
+@pytest.mark.asyncio
+async def test_path_exists_other_error_is_unverified_not_a_verdict():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "HTTP 500"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert "EXISTS" not in out and "MISSING" not in out.split(":")[0]
+    assert out.startswith("Error")

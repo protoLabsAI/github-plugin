@@ -55,9 +55,10 @@ def register(registry) -> None:
     n_write = 0
     if write_enabled:
         try:
+            from .review_tools import get_review_tools
             from .write_tools import get_write_tools
 
-            write = get_write_tools(default_repo)
+            write = get_write_tools(default_repo) + get_review_tools(default_repo)
             for t in write:
                 registry.register_tool(t)
             n_write = len(write)
