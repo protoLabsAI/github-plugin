@@ -287,6 +287,47 @@ def get_read_tools(default_repo: str = "") -> list:
         return out
 
     @tool
+    async def github_path_exists(path: str, repo: str = "", ref: str = "") -> str:
+        """Check whether a path exists in a GitHub repo — the grounding probe for
+        review claims about external references.
+
+        A diff is often only correct if something OUTSIDE it exists (a cross-repo
+        `COPY --from` path, a workspace package, an action ref). The answer is
+        authoritative: EXISTS means the assumption holds (don't invent a problem
+        around it); MISSING means the dependency is really absent (that's the
+        finding). A tool error means UNVERIFIED — report a Gap, never a severity.
+
+        Args:
+            repo: Repository as ``owner/name`` — may be a DIFFERENT repo than the
+                PR under review (that is the point). Omit for the default repo.
+            path: Repo-relative path to check (file or directory).
+            ref: Optional branch / tag / SHA (default: the repo's default branch).
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        if not path.strip():
+            return "Error: `path` is empty."
+        clean = path.strip().strip("/")
+        args = ["api", f"repos/{repo}/contents/{clean}"]
+        if ref.strip():
+            args += ["-f", f"ref={ref.strip()}"]
+        rc, out, serr = await run_gh(args)
+        if rc == 0:
+            return f"EXISTS: {repo}/{clean}" + (f" @ {ref.strip()}" if ref.strip() else "")
+        blob = (serr or out or "").lower()
+        if "404" in blob or "not found" in blob:
+            return (
+                f"MISSING: {repo}/{clean}"
+                + (f" @ {ref.strip()}" if ref.strip() else "")
+                + " — the path does not exist."
+            )
+        return (
+            check_gh_error(rc, serr)
+            or f"Error (gh exit {rc}): could not verify {repo}/{clean} — treat as UNVERIFIED (a Gap, not a finding)."
+        )
+
+    @tool
     async def github_repo_contents(repo: str = "", path: str = "", ref: str = "") -> str:
         """List the contents (files + dirs) of a path in a GitHub repo.
 
@@ -325,6 +366,7 @@ def get_read_tools(default_repo: str = "") -> list:
         github_list_issues,
         github_get_commit_diff,
         github_pr_diff,
+        github_path_exists,
         github_ci_runs,
         github_run_failure,
         github_read_file,
