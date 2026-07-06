@@ -163,6 +163,28 @@ def get_read_tools(default_repo: str = "") -> list:
         return f"Commit {repo}@{ref}:\n\n{diff}"
 
     @tool
+    async def github_pr_diff(number: int, repo: str = "", max_chars: int = 12000) -> str:
+        """Fetch a pull request's full unified diff — for reviewing the change itself.
+
+        Args:
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            number: PR number.
+            max_chars: Truncate the diff at this many characters (default 12000).
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        rc, out, serr = await run_gh(["pr", "diff", str(number), "--repo", repo])
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        diff = out.strip()
+        if not diff:
+            return f"No diff for {repo}#{number} (empty PR or diff unavailable)."
+        if len(diff) > max_chars:
+            diff = diff[:max_chars] + f"\n… (truncated at {max_chars} chars)"
+        return f"PR {repo}#{number} diff:\n\n{diff}"
+
+    @tool
     async def github_ci_runs(repo: str = "", branch: str = "", limit: int = 15) -> str:
         """List recent GitHub Actions runs for a repo — for CI triage.
 
@@ -302,6 +324,7 @@ def get_read_tools(default_repo: str = "") -> list:
         github_get_issue,
         github_list_issues,
         github_get_commit_diff,
+        github_pr_diff,
         github_ci_runs,
         github_run_failure,
         github_read_file,
