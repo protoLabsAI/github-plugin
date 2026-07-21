@@ -314,3 +314,61 @@ async def test_path_exists_other_error_is_unverified_not_a_verdict():
         out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
     assert "EXISTS" not in out and "MISSING" not in out.split(":")[0]
     assert out.startswith("Error")
+
+
+# ── github_read_pr_file: the ref is resolved server-side, never by the caller ────
+# Regression for pr-reviewer-plugin#20: a review that read a PR's files at the
+# DEFAULT branch "confirmed" that symbols the PR ADDS did not exist, producing
+# blocker findings on correct PRs. This tool removes the ref from the caller's
+# hands entirely.
+
+
+def _read_pr_file_tool():
+    for t in get_read_tools():
+        if t.name == "github_read_pr_file":
+            return t
+    raise AssertionError("github_read_pr_file tool not found")
+
+
+@pytest.mark.asyncio
+async def test_read_pr_file_reads_at_the_prs_head_sha():
+    head = "19c37f7a7db6f0c1a2b3c4d5e6f708192a3b4c5d"
+    calls = []
+
+    async def fake_gh(args, **kw):
+        calls.append(args)
+        if "/pulls/" in args[1]:
+            return 0, head + "\n", ""
+        return 0, "export const goalDetailQuery = () => {}\n", ""
+
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=fake_gh)):
+        out = await _read_pr_file_tool().ainvoke({"repo": "o/r", "number": 2088, "path": "src/lib/queries.ts"})
+
+    # the content read is pinned to the head SHA the PR reported
+    content_call = " ".join(calls[-1])
+    assert f"ref={head}" in content_call
+    assert "goalDetailQuery" in out and head[:12] in out
+
+
+@pytest.mark.asyncio
+async def test_read_pr_file_never_falls_back_to_the_default_branch():
+    """A failed pinned read must ERROR, not silently serve the pre-PR file."""
+
+    async def fake_gh(args, **kw):
+        if "/pulls/" in args[1]:
+            return 0, "a" * 40 + "\n", ""
+        return 1, "", "Not Found (HTTP 404)"
+
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=fake_gh)):
+        out = await _read_pr_file_tool().ainvoke({"repo": "o/r", "number": 1, "path": "nope.ts"})
+    assert out.startswith("Error reading nope.ts")
+
+
+@pytest.mark.asyncio
+async def test_read_pr_file_errors_when_the_head_sha_is_unresolvable():
+    async def fake_gh(args, **kw):
+        return 0, "\n", ""  # empty head — a PR we cannot pin
+
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=fake_gh)):
+        out = await _read_pr_file_tool().ainvoke({"repo": "o/r", "number": 1, "path": "x.ts"})
+    assert "could not resolve the head SHA" in out
