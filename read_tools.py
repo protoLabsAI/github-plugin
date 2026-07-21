@@ -287,6 +287,51 @@ def get_read_tools(default_repo: str = "") -> list:
         return out
 
     @tool
+    async def github_read_pr_file(number: int, path: str, repo: str = "") -> str:
+        """Read a file as it exists IN a pull request — at the PR's head commit.
+
+        Use this for every code-context read while reviewing a PR. Unlike
+        ``github_read_file``, there is no ref to get wrong: the head SHA is resolved
+        server-side from the PR number, so the file you get is the PR's version,
+        including anything the PR adds.
+
+        Args:
+            number: PR number.
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            path: Path to the file within the repo (e.g. ``src/lib/queries.ts``).
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        # The ref is resolved HERE, from the PR — never supplied by the caller. A
+        # model that omits (or mistypes) a ref on a plain read silently gets the
+        # DEFAULT branch, i.e. the pre-PR file: it then "confirms" that symbols the
+        # PR adds don't exist, which reads as a blocker finding on correct code.
+        rc, out, serr = await run_gh(["api", f"repos/{repo}/pulls/{number}", "--jq", ".head.sha"])
+        if gh_err := check_gh_error(rc, serr):
+            return gh_err
+        head = out.strip()
+        if not head:
+            return f"Error: could not resolve the head SHA for {repo}#{number}."
+        rc, out, serr = await run_gh(
+            [
+                "api",
+                f"repos/{repo}/contents/{path}",
+                "-H",
+                "Accept: application/vnd.github.raw+json",
+                "-f",
+                f"ref={head}",
+            ]
+        )
+        if gh_err := check_gh_error(rc, serr):
+            # Fail LOUD, never fall back to the default branch: a silent fallback is
+            # exactly the bug this tool exists to prevent.
+            return f"Error reading {path} at {repo}#{number} head {head[:12]}: {gh_err}"
+        if len(out) > 20000:
+            out = out[:20000] + "\n… (truncated at 20000 chars)"
+        return f"{path} @ {repo}#{number} head {head[:12]}:\n\n{out}"
+
+    @tool
     async def github_path_exists(path: str, repo: str = "", ref: str = "") -> str:
         """Check whether a path exists in a GitHub repo — the grounding probe for
         review claims about external references.
@@ -370,5 +415,6 @@ def get_read_tools(default_repo: str = "") -> list:
         github_ci_runs,
         github_run_failure,
         github_read_file,
+        github_read_pr_file,
         github_repo_contents,
     ]
