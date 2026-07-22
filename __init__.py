@@ -61,9 +61,7 @@ def register(registry) -> None:
             # Pass the host's event-bus seam (ADR 0039) when it exists so PR lifecycle
             # events broadcast as `github.pr.opened` / `github.pr.merged`. hasattr-guarded
             # like the other host couplings — an older host just gets no events.
-            write = get_write_tools(default_repo, emit=getattr(registry, "emit", None)) + get_review_tools(
-                default_repo
-            )
+            write = get_write_tools(default_repo, emit=getattr(registry, "emit", None)) + get_review_tools(default_repo)
             for t in write:
                 registry.register_tool(t)
             n_write = len(write)
