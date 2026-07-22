@@ -36,9 +36,28 @@ def _csv(value: str) -> list[str]:
     return [tok.strip() for tok in (value or "").split(",") if tok.strip()]
 
 
-def get_write_tools(default_repo: str = "") -> list:
+def _pr_number(url: str) -> str:
+    """The PR number from a ``…/pull/<n>`` URL, or "" when it isn't one."""
+    tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
+    return tail if tail.isdigit() else ""
+
+
+def get_write_tools(default_repo: str = "", emit=None) -> list:
     """Build the write tools. ``default_repo`` (``owner/name``) is used whenever a tool's
-    ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it."""
+    ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it.
+
+    ``emit`` is the host's namespaced event-bus seam (ADR 0039; ``registry.emit``). When
+    given, PR lifecycle events are broadcast as ``github.pr.opened`` / ``github.pr.merged``
+    so consumers (e.g. a fleet activity feed) can surface them without polling. Optional
+    and fully guarded — an older host, or a bus error, never fails a tool."""
+
+    def _emit(topic: str, data: dict) -> None:
+        if not emit:
+            return
+        try:
+            emit(topic, data)
+        except Exception:  # noqa: BLE001 — telemetry must never break a write tool
+            pass
 
     @tool
     async def github_create_issue(title: str, repo: str = "", body: str = "", labels: str = "") -> str:
@@ -118,7 +137,12 @@ def get_write_tools(default_repo: str = "") -> list:
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr):
             return gh_err
-        return out.strip()
+        url = out.strip()
+        _emit(
+            "pr.opened",
+            {"repo": repo, "number": _pr_number(url), "title": title, "url": url, "head": head, "base": base},
+        )
+        return url
 
     @tool
     async def github_edit_pr(number: int, repo: str = "", title: str = "", body: str = "", state: str = "") -> str:
@@ -203,6 +227,7 @@ def get_write_tools(default_repo: str = "") -> list:
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr):
             return gh_err
+        _emit("pr.merged", {"repo": repo, "number": str(number), "method": method})
         return out.strip() or f"Merged PR #{number} in {repo} via {method}."
 
     @tool
