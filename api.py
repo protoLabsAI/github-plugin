@@ -81,7 +81,11 @@ async def fetch_prs(repo: str, state: str = "open", limit: int = 30) -> dict:
 
 
 def _repos(cfg: dict) -> list[str]:
-    return [str(r).strip() for r in (cfg.get("repos") or []) if str(r).strip()]
+    """The picker list — explicit ``github.repos``, else the host's ADR 0095
+    managed-projects registry (v0.115.0+; ``[]`` on older hosts)."""
+    from .projects import effective_repos
+
+    return effective_repos(cfg.get("repos"))
 
 
 def build_view_router():
