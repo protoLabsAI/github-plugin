@@ -33,11 +33,13 @@ def register(registry) -> None:
     write_enabled = bool(cfg.get("write", False))
 
     # The default repo the tools fall back to when their `repo` arg is omitted — the
-    # configured `default_repo`, else the first of `repos` (same resolution as /issue and
-    # the board). Tools are rebuilt on a config reload, so capturing it here is live enough.
+    # configured `default_repo`, else the first of `repos`, else the first repo in the
+    # host's ADR 0095 managed-projects registry (same resolution as /issue and the
+    # board). Tools are rebuilt on a config reload, so capturing it here is live enough.
     from .gh_issue import effective_default_repo
+    from .projects import effective_repos
 
-    default_repo = effective_default_repo(cfg.get("default_repo", ""), cfg.get("repos", []))
+    default_repo = effective_default_repo(cfg.get("default_repo", ""), effective_repos(cfg.get("repos")))
 
     # READ tools — always available (they return an error string if `gh`/auth is missing).
     n_read = 0
