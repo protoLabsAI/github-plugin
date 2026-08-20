@@ -2,7 +2,7 @@
 # Keep `version` in lockstep with pyproject.toml (tests/test_version.py asserts it).
 id: github
 name: GitHub (read/write tools)
-version: 0.4.0
+version: 0.5.0
 description: >-
   Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
   read tools (PRs, issues, diffs, CI, repo files/contents) are always on; the write
@@ -24,13 +24,15 @@ config:
   write: false                 # false = read tools only; true = read + write tools
   default_repo: ""             # preselected repo for /issue (owner/name); "" = none
   repos: []                    # repo picker list (each owner/name) for /issue + views.
-                               # LEAVE EMPTY to inherit the host's managed-projects
-                               # registry (ADR 0095, protoAgent 0.115.0+): every
-                               # `projects:` entry with a `github:` field feeds the
-                               # picker, so a project is declared once instead of here
-                               # as well. Setting this list explicitly WINS and the
-                               # registry is not consulted; on older hosts (or with no
-                               # registry configured) behavior is unchanged.
+                               # The host's managed-projects registry (ADR 0095,
+                               # protoAgent 0.115.0+) is ALWAYS added: every `projects:`
+                               # entry with a `github:` field (and any legacy
+                               # filesystem.projects entry carrying one) feeds the
+                               # picker, so a project — including one the agent
+                               # onboards itself — is declared once. Entries listed
+                               # here come first, in this order, so the default-repo
+                               # resolution is unchanged; the registry's follow.
+                               # Older hosts with no registry: behavior is unchanged.
 
 # Settings (ADR 0019) — surfaced as editable fields in the console.
 settings:

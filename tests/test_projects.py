@@ -20,13 +20,13 @@ from ghplugin.projects import effective_repos, registry_repos
 def fake_host(monkeypatch):
     """Install a fake `graph.sdk` whose config() returns the given projects list."""
 
-    def _install(projects, *, raises: bool = False):
+    def _install(projects, *, raises: bool = False, fence=None):
         sdk = types.ModuleType("graph.sdk")
 
         def config():
             if raises:
                 raise RuntimeError("config not loaded")
-            return types.SimpleNamespace(projects=projects)
+            return types.SimpleNamespace(projects=projects, filesystem_projects=fence)
 
         sdk.config = config
         graph = types.ModuleType("graph")
@@ -81,10 +81,29 @@ def test_registry_repos_are_deduped_in_config_order(fake_host):
     assert registry_repos() == ["o/a", "o/c"]
 
 
-def test_explicit_repos_win_over_the_registry(fake_host):
-    """Non-regression: a configured picker list means the registry is never consulted."""
-    fake_host([{"name": "a", "path": "/a", "github": "o/registry"}])
-    assert effective_repos(["o/explicit"]) == ["o/explicit"]
+def test_explicit_repos_lead_and_the_registry_follows(fake_host):
+    """An explicit picker list is ADDED TO by the registry, never replaced by it and
+    never allowed to hide it: the operator's entries keep their order (and so the
+    default-repo resolution), the registry's come after, deduped. v0.4.0's
+    explicit-wins made one typed list bury every later onboard_project forever."""
+    fake_host(
+        [{"name": "a", "path": "/a", "github": "o/registry"}, {"name": "b", "path": "/b", "github": "o/explicit"}]
+    )
+    assert effective_repos(["o/explicit", "o/other"]) == ["o/explicit", "o/other", "o/registry"]
+
+
+def test_registry_also_reads_github_bindings_on_the_legacy_fence_override(fake_host):
+    """A pre-registry instance (or one written by the pre-#2925 onboard tool) carries
+    `github:` on filesystem.projects entries — those repos count, after the registry's."""
+    fake_host(
+        [{"name": "a", "path": "/a", "github": "o/reg"}],
+        fence=[
+            {"name": "x", "path": "/x", "github": "o/fence"},
+            {"name": "y", "path": "/y"},
+            {"name": "z", "path": "/z", "github": "o/reg"},
+        ],
+    )
+    assert registry_repos() == ["o/reg", "o/fence"]
 
 
 def test_registry_fills_an_empty_picker(fake_host):
