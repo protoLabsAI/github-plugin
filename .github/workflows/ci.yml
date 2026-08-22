@@ -21,7 +21,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dev deps
-        run: pip install -r requirements-dev.txt ruff
+        # ruff is PINNED in requirements-dev.txt (0.15.10, the protoAgent/projectBoard pin) —
+        # a floating ruff fails `format --check` on correctly-formatted code.
+        run: pip install -r requirements-dev.txt
 
       - name: Lint
         run: ruff check . && ruff format --check .
