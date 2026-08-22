@@ -5,7 +5,10 @@ Each validates its repo with `bad_repo()`, runs via `run_gh()`, and degrades to 
 readable `Error: ...` string.
 
 The set:
-  - github_create_issue  — `gh issue create` (returns the new issue URL).
+  - github_create_issue  — `gh issue create` (returns the new issue URL). Runs the SAME
+    body gate the user-only `/issue` command enforces (gh_issue.missing_sections): a
+    body without a Problem section (+ repro for a bug, a direction/acceptance for a
+    feature) is refused with the scaffold, never posted.
   - github_comment       — `gh issue comment` (works for PRs too — a PR is an issue).
   - github_create_pr     — `gh pr create` (returns the new PR URL).
   - github_edit_pr       — `gh pr edit` (+ `gh pr ready`) to change title/body/draft.
@@ -28,7 +31,7 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from .gh_cli import bad_repo, check_gh_error, run_gh
-from .gh_issue import resolve_repo
+from .gh_issue import labels_for, missing_sections, resolve_repo, scaffold_for
 
 
 def _csv(value: str) -> list[str]:
@@ -61,25 +64,42 @@ def get_write_tools(default_repo="", emit=None) -> list:
             pass
 
     @tool
-    async def github_create_issue(title: str, repo: str = "", body: str = "", labels: str = "") -> str:
-        """Create a GitHub issue.
+    async def github_create_issue(
+        title: str, repo: str = "", body: str = "", labels: str = "", kind: str = "generic"
+    ) -> str:
+        """Create a GitHub issue. Search first (``github_search_issues``) so you don't file
+        a duplicate. The body is GATED like the `/issue` command: it needs a substantive
+        description (>= 80 chars) with a ``## Problem`` (or Motivation/Context) section; a
+        ``bug`` also needs a ``## Steps to reproduce`` / Evidence / Expected-vs-actual
+        section; a ``feature`` needs a ``## Proposed direction`` or ``## Acceptance``
+        section. A body that fails the gate is NOT posted — the tool returns what's
+        missing plus a scaffold to fill in.
 
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             title: Issue title.
-            body: Issue body (Markdown).
+            body: Issue body (Markdown) — use headings for the sections above.
             labels: Optional comma-separated label names.
+            kind: ``generic`` (default) | ``bug`` | ``feature`` — picks the gate's required
+                sections and adds the type label (``bug`` / ``enhancement``).
 
-        Returns the new issue URL.
+        Returns the new issue URL, or the gate's "Not filed — missing …" with a scaffold.
         """
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
+        kind = (kind or "generic").strip().lower()
+        if kind not in ("bug", "feature", "generic"):
+            return f"Error: kind must be 'bug', 'feature' or 'generic' (got {kind!r})."
+        if miss := missing_sections(body or "", kind):
+            return (
+                "Not filed — the issue body is missing " + "; ".join(miss) + ". "
+                "Add the section(s) and call again. Scaffold for a "
+                f"{kind} issue:\n```\n{scaffold_for(kind)}```"
+            )
         args = ["issue", "create", "--repo", repo, "--title", title, "--body", body]
-        for label in labels.split(","):
-            label = label.strip()
-            if label:
-                args += ["--label", label]
+        for label in labels_for(kind, _csv(labels)):
+            args += ["--label", label]
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err

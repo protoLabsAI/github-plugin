@@ -1,9 +1,13 @@
 """GitHub READ tools over `gh` — always registered (read-only is the safe default).
 
-Twelve tools, all implemented: six ported from protoAgent's tools/github_tools.py
+Fifteen tools, all implemented: six ported from protoAgent's tools/github_tools.py
 (PRs, issues, diffs, CI), the repo-content readers (`github_read_file`,
 `github_read_pr_file`, `github_repo_contents`, `github_path_exists`), `github_pr_diff`,
-and `github_status` (the self-diagnosis probe — is `gh` installed / authenticated).
+`github_status` (the self-diagnosis probe — is `gh` installed / authenticated), and the
+PM verbs (v0.7.0): `github_list_prs` (the PR board: draft / review decision / merge
+state), `github_issue_comments` (the thread on an issue or PR), and
+`github_search_issues` (dedupe BEFORE filing). `github_get_pr` carries the merge
+readiness picture — review decision, mergeability, a checks summary, the reviews.
 Each tool takes an `owner/name` repo — or falls back to the configured default when
 it's omitted (a LIVE getter, so a Settings edit or an onboarded project is seen by the
 next call) — and degrades to a readable, classified `Error: ...` string (not
@@ -28,6 +32,67 @@ _CI_ERR_RE = re.compile(
 )
 
 
+_MAX_PR_CHARS = 12000  # github_get_pr's total output bound
+_MAX_REVIEWS = 10
+_MAX_COMMENT_CHARS = 1000
+
+# statusCheckRollup carries two shapes (verified against gh 2.92): a CheckRun
+# {name, status: COMPLETED|IN_PROGRESS|QUEUED|…, conclusion: SUCCESS|FAILURE|SKIPPED|
+# CANCELLED|NEUTRAL|TIMED_OUT|ACTION_REQUIRED|""} and a StatusContext {context,
+# state: SUCCESS|PENDING|FAILURE|ERROR|EXPECTED}.
+_CHECK_FAIL = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+_CHECK_SKIP = {"SKIPPED", "NEUTRAL", "STALE"}
+
+
+def _one_line(text: str, cap: int) -> str:
+    """Collapse whitespace and cap — for a review/comment excerpt on one line."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= cap else t[: cap - 1] + "…"
+
+
+def _bounded(text: str, cap: int) -> str:
+    return text if len(text) <= cap else text[:cap] + f"\n… (truncated at {cap} chars)"
+
+
+def _summarize_checks(rollup) -> str:
+    """``N pass / N fail / N pending (/ N skipped) — failing: a, b`` from a PR's
+    statusCheckRollup; ``none`` when the commit has no checks."""
+    items = dicts(rollup)
+    if not items:
+        return "none"
+    n_pass = n_fail = n_pending = n_skip = 0
+    failing: list[str] = []
+    for c in items:
+        name = str(c.get("name") or c.get("context") or "?")
+        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
+            state = str(c.get("state") or "").upper()
+            if state == "SUCCESS":
+                n_pass += 1
+            elif state in _CHECK_FAIL:
+                n_fail += 1
+                failing.append(name)
+            else:  # PENDING / EXPECTED / unknown
+                n_pending += 1
+            continue
+        status = str(c.get("status") or "").upper()
+        conclusion = str(c.get("conclusion") or "").upper()
+        if status and status != "COMPLETED":
+            n_pending += 1
+        elif conclusion == "SUCCESS":
+            n_pass += 1
+        elif conclusion in _CHECK_FAIL:
+            n_fail += 1
+            failing.append(name)
+        elif conclusion in _CHECK_SKIP:
+            n_skip += 1
+        else:
+            n_pending += 1
+    parts = f"{n_pass} pass / {n_fail} fail / {n_pending} pending" + (f" / {n_skip} skipped" if n_skip else "")
+    if failing:
+        parts += " — failing: " + ", ".join(failing[:10]) + (" …" if len(failing) > 10 else "")
+    return parts
+
+
 def get_read_tools(default_repo="", repos=None, registry=None) -> list:
     """Build the read tools. ``default_repo`` (``owner/name``, or a zero-arg getter
     returning it — the live-config case) is used whenever a tool's ``repo`` arg is
@@ -44,7 +109,10 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_get_pr(number: int, repo: str = "") -> str:
-        """Fetch a GitHub pull request: title, state, author, body, branch, and changed files.
+        """Fetch a GitHub pull request — the merge-readiness picture in one call: title,
+        state, draft?, author, branch, review decision, mergeability + merge state, a
+        checks summary (N pass / N fail / N pending + the failing check names), the
+        reviews (author, verdict, excerpt), changed files, and the body.
 
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
@@ -61,7 +129,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
                 "--repo",
                 repo,
                 "--json",
-                "number,title,state,author,body,additions,deletions,files,url,headRefName,baseRefName",
+                "number,title,state,isDraft,author,body,additions,deletions,files,url,headRefName,baseRefName,"
+                "reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews",
             ]
         )
         if gh_err := check_gh_error(rc, serr, repo=repo):
@@ -70,13 +139,29 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         if perr:
             return perr
         files = ", ".join(str(f.get("path", "?")) for f in dicts(d.get("files"))[:20])
-        return (
-            f"PR #{d.get('number')} [{d.get('state')}] {d.get('title')}\n"
+        draft = " (DRAFT)" if d.get("isDraft") else ""
+        checks = _summarize_checks(d.get("statusCheckRollup"))
+        reviews = dicts(d.get("reviews"))
+        review_lines = [
+            f"  - {str((r.get('author') or {}).get('login') or '?') if isinstance(r.get('author'), dict) else '?'} "
+            f"[{r.get('state') or '?'}]"
+            + (f": {_one_line(str(r.get('body') or ''), 300)}" if str(r.get("body") or "").strip() else "")
+            for r in reviews[:_MAX_REVIEWS]
+        ]
+        if len(reviews) > _MAX_REVIEWS:
+            review_lines.append(f"  … {len(reviews) - _MAX_REVIEWS} more review(s)")
+        text = (
+            f"PR #{d.get('number')} [{d.get('state')}]{draft} {d.get('title')}\n"
             f"branch: {d.get('headRefName', '?')} -> {d.get('baseRefName', '?')}\n"
-            f"by {(d.get('author') or {}).get('login', '?')} | "
+            f"by {(d.get('author') or {}).get('login', '?') if isinstance(d.get('author'), dict) else '?'} | "
             f"+{d.get('additions', 0)}/-{d.get('deletions', 0)} | {d.get('url')}\n"
+            f"review decision: {d.get('reviewDecision') or 'none yet'} | "
+            f"mergeable: {d.get('mergeable') or '?'} | merge state: {d.get('mergeStateStatus') or '?'}\n"
+            f"checks: {checks}\n"
+            f"reviews ({len(reviews)}):" + ("\n" + "\n".join(review_lines) if review_lines else " none") + "\n"
             f"files: {files or '(none)'}\n\n{(d.get('body') or '').strip()[:2000]}"
         )
+        return _bounded(text, _MAX_PR_CHARS)
 
     @tool
     async def github_get_issue(number: int, repo: str = "") -> str:
@@ -422,6 +507,137 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         return "\n".join(lines)
 
     @tool
+    async def github_list_prs(repo: str = "", state: str = "open", limit: int = 30) -> str:
+        """List pull requests — the PR board: number, title, author, state, draft?, branch,
+        review decision and merge state per row. Use ``github_get_pr`` for one PR's full picture.
+
+        Args:
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            state: ``open`` (default) | ``closed`` | ``merged`` | ``all``.
+            limit: Max PRs to return (1-100, default 30).
+        """
+        from .api import fetch_prs
+
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        try:
+            capped = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            capped = 30
+        res = await fetch_prs(repo, state, capped)
+        if res.get("error"):
+            return str(res["error"])
+        items = dicts(res.get("items"))
+        if not items:
+            return f"No {state} pull requests in {repo}."
+        lines = [f"{len(items)} {state} pull request(s) in {repo}:"]
+        for it in items:
+            author = (it.get("author") or {}).get("login", "?") if isinstance(it.get("author"), dict) else "?"
+            flags = [
+                x
+                for x in (("draft" if it.get("isDraft") else ""), it.get("reviewDecision"), it.get("mergeStateStatus"))
+                if x
+            ]
+            lines.append(
+                f"  #{it.get('number')} [{it.get('state')}] {it.get('title')} — {author} | "
+                f"{it.get('headRefName', '?')} -> {it.get('baseRefName', '?')}"
+                + (f" | {', '.join(str(f) for f in flags)}" if flags else "")
+                + f" | {it.get('url')}"
+            )
+        return "\n".join(lines)
+
+    @tool
+    async def github_issue_comments(number: int, repo: str = "", limit: int = 30) -> str:
+        """Read the comment thread on an issue or pull request (a PR is an issue for
+        comments): author, date and body per comment, newest ``limit`` in chronological
+        order. Use it to catch up on a discussion before replying or deciding.
+
+        Args:
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            number: Issue or PR number.
+            limit: Max comments to return (1-100, default 30 — the most recent ones).
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        try:
+            capped = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            capped = 30
+        rc, out, serr = await run_gh(["issue", "view", str(number), "--repo", repo, "--json", "comments"])
+        if gh_err := check_gh_error(rc, serr, repo=repo):
+            return gh_err
+        d, perr = parse_json(out, dict)
+        if perr:
+            return perr
+        comments = dicts(d.get("comments"))
+        if not comments:
+            return f"No comments on {repo}#{number}."
+        shown = comments[-capped:]
+        head = f"{len(comments)} comment(s) on {repo}#{number}" + (
+            f" — showing the last {len(shown)}" if len(shown) < len(comments) else ""
+        )
+        lines = [head + ":"]
+        for c in shown:
+            author = (c.get("author") or {}).get("login", "?") if isinstance(c.get("author"), dict) else "?"
+            body = " ".join(str(c.get("body") or "").split())
+            if len(body) > _MAX_COMMENT_CHARS:
+                body = body[: _MAX_COMMENT_CHARS - 1] + "…"
+            lines.append(f"--- {author} · {c.get('createdAt') or '?'}\n{body or '(empty)'}")
+        return "\n".join(lines)
+
+    @tool
+    async def github_search_issues(query: str, repo: str = "", state: str = "open", limit: int = 20) -> str:
+        """Search a repo's issues by text — DEDUPE BEFORE FILING: call this with the
+        gist of a problem before ``github_create_issue`` and reference or reopen a
+        match instead of filing a duplicate. Returns number, state, title and URL per hit.
+
+        Args:
+            query: Free-text search (GitHub issue search syntax; e.g. ``"default_repo" label:bug``).
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            state: ``open`` (default) | ``closed`` | ``all``.
+            limit: Max results (1-100, default 20).
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        if not (query or "").strip():
+            return "Error: `query` is empty — say what you're looking for."
+        if state not in ("open", "closed", "all"):
+            return f"Error: state must be open|closed|all (got {state!r})."
+        try:
+            capped = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            capped = 20
+        args = [
+            "search",
+            "issues",
+            "--repo",
+            repo,
+            query.strip(),
+            "--limit",
+            str(capped),
+            "--json",
+            "number,title,state,url",
+        ]
+        if state != "all":  # gh's --state is open|closed only; "all" = no filter
+            args += ["--state", state]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr, repo=repo):
+            return gh_err
+        items, perr = parse_json(out or "[]", list)
+        if perr:
+            return perr
+        items = dicts(items)
+        if not items:
+            return f"No {state} issues in {repo} match {query.strip()!r} — nothing to dedupe against."
+        lines = [f"{len(items)} {state} issue(s) in {repo} matching {query.strip()!r}:"]
+        for it in items:
+            lines.append(f"  #{it.get('number')} [{it.get('state')}] {it.get('title')} — {it.get('url')}")
+        return "\n".join(lines)
+
+    @tool
     async def github_status() -> str:
         """Check whether the GitHub CLI is installed and authenticated, and which repo the
         other github_* tools default to. Call this FIRST when any github_* tool returns an
@@ -451,5 +667,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         github_read_file,
         github_read_pr_file,
         github_repo_contents,
+        github_list_prs,
+        github_issue_comments,
+        github_search_issues,
         github_status,
     ]

@@ -493,3 +493,229 @@ async def test_path_exists_classifies_before_the_missing_verdict():
     with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "gh: Not Found (HTTP 404)"))):
         out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
     assert out.startswith("MISSING: owner/name/x") and "repo is inaccessible" in out
+
+
+# ── v0.7.0: the PM verbs ─────────────────────────────────────────────────────────
+
+
+def _tool(name, default_repo=""):
+    for t in get_read_tools(default_repo):
+        if t.name == name:
+            return t
+    raise AssertionError(f"{name} not found")
+
+
+_RICH_PR_JSON = json.dumps(
+    {
+        **json.loads(_PR_JSON),
+        "isDraft": True,
+        "reviewDecision": "CHANGES_REQUESTED",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BLOCKED",
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"__typename": "CheckRun", "name": "e2e", "status": "IN_PROGRESS", "conclusion": ""},
+            {"__typename": "CheckRun", "name": "docs", "status": "COMPLETED", "conclusion": "SKIPPED"},
+            {"__typename": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS"},
+            {"__typename": "StatusContext", "context": "deploy/preview", "state": "PENDING"},
+            {"__typename": "StatusContext", "context": "security", "state": "ERROR"},
+        ],
+        "reviews": [
+            {"author": {"login": "quinn"}, "state": "CHANGES_REQUESTED", "body": "Blocker: " + "x" * 400},
+            {"author": {"login": "kj"}, "state": "APPROVED", "body": ""},
+            {"author": None, "state": "COMMENTED", "body": "drive-by"},
+        ],
+    }
+)
+
+
+@pytest.mark.asyncio
+async def test_get_pr_requests_and_renders_the_merge_readiness_fields():
+    mock = AsyncMock(return_value=(0, _RICH_PR_JSON, ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 38})
+    json_arg = mock.call_args.args[0][mock.call_args.args[0].index("--json") + 1]
+    for f in ("isDraft", "reviewDecision", "mergeable", "mergeStateStatus", "statusCheckRollup", "reviews"):
+        assert f in json_arg
+    assert "PR #38 [OPEN] (DRAFT) feat: fix the ephemeral label" in out
+    assert "review decision: CHANGES_REQUESTED | mergeable: MERGEABLE | merge state: BLOCKED" in out
+    assert "checks: 2 pass / 2 fail / 2 pending / 1 skipped — failing: lint, security" in out
+    assert "reviews (3):" in out
+    assert "  - quinn [CHANGES_REQUESTED]: Blocker: " in out and "x" * 300 not in out  # body capped at 300
+    assert "  - kj [APPROVED]" in out and "  - ? [COMMENTED]: drive-by" in out  # null author tolerated
+    assert "files: view.py" in out and out.rstrip().endswith("fixed it")
+
+
+@pytest.mark.asyncio
+async def test_get_pr_with_no_checks_or_reviews_says_so():
+    d = {**json.loads(_PR_JSON), "statusCheckRollup": [], "reviews": [], "reviewDecision": ""}
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
+        out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 38})
+    assert "checks: none" in out and "reviews (0): none" in out and "review decision: none yet" in out
+
+
+@pytest.mark.asyncio
+async def test_get_pr_output_is_bounded():
+    from ghplugin.read_tools import _MAX_PR_CHARS
+
+    d = {
+        **json.loads(_RICH_PR_JSON),
+        "body": "b" * 50000,
+        "reviews": [{"author": {"login": "r"}, "state": "COMMENTED", "body": "y" * 2000}] * 40,
+    }
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
+        out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
+    assert len(out) <= _MAX_PR_CHARS + 60 and "… 30 more review(s)" in out
+
+
+def test_summarize_checks_shapes():
+    from ghplugin.read_tools import _summarize_checks
+
+    assert _summarize_checks(None) == "none" and _summarize_checks([]) == "none"
+    assert _summarize_checks("garbage") == "none"
+    assert (
+        _summarize_checks([{"name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"}])
+        == "1 pass / 0 fail / 0 pending"
+    )
+    assert _summarize_checks([{"context": "ci", "state": "FAILURE"}]) == "0 pass / 1 fail / 0 pending — failing: ci"
+    assert _summarize_checks([{"name": "q", "status": "QUEUED", "conclusion": None}]) == "0 pass / 0 fail / 1 pending"
+
+
+# github_list_prs — reuses api.fetch_prs (so patch run_gh where api binds it)
+
+
+@pytest.mark.asyncio
+async def test_list_prs_reuses_the_board_fetch_and_renders_flags():
+    rows = json.dumps(
+        [
+            {
+                "number": 5,
+                "title": "PR",
+                "state": "OPEN",
+                "author": {"login": "kj"},
+                "isDraft": True,
+                "headRefName": "f",
+                "baseRefName": "main",
+                "reviewDecision": "",
+                "mergeStateStatus": "BLOCKED",
+                "url": "u5",
+            },
+            {
+                "number": 6,
+                "title": "Q",
+                "state": "OPEN",
+                "author": None,
+                "isDraft": False,
+                "headRefName": "g",
+                "baseRefName": "main",
+                "reviewDecision": "APPROVED",
+                "mergeStateStatus": "CLEAN",
+                "url": "u6",
+            },
+        ]
+    )
+    mock = AsyncMock(return_value=(0, rows, ""))
+    with patch("ghplugin.api.run_gh", mock):
+        out = await _tool("github_list_prs").ainvoke({"repo": "owner/name", "state": "all", "limit": 500})
+    argv = mock.call_args.args[0]
+    assert (
+        argv[:4] == ["pr", "list", "--repo", "owner/name"]
+        and "--state" in argv
+        and argv[argv.index("--limit") + 1] == "100"
+    )
+    json_arg = argv[argv.index("--json") + 1]
+    for f in ("isDraft", "headRefName", "baseRefName", "reviewDecision", "mergeStateStatus"):
+        assert f in json_arg
+    assert out.startswith("2 all pull request(s) in owner/name:")
+    assert "  #5 [OPEN] PR — kj | f -> main | draft, BLOCKED | u5" in out
+    assert "  #6 [OPEN] Q — ? | g -> main | APPROVED, CLEAN | u6" in out
+
+
+@pytest.mark.asyncio
+async def test_list_prs_empty_bad_state_and_errors():
+    with patch("ghplugin.api.run_gh", new=AsyncMock(return_value=(0, "[]", ""))):
+        assert (
+            await _tool("github_list_prs").ainvoke({"repo": "owner/name"})
+        ) == "No open pull requests in owner/name."
+    with patch("ghplugin.api.run_gh", new=AsyncMock(return_value=(4, "", "gh auth login"))):
+        out = await _tool("github_list_prs").ainvoke({"repo": "owner/name"})
+    assert out.startswith("Error: GitHub CLI is not authenticated")
+    assert "state must be" in (await _tool("github_list_prs").ainvoke({"repo": "owner/name", "state": "weird"}))
+    assert (await _tool("github_list_prs").ainvoke({"repo": "bad"})).startswith("Error: no usable repo")
+
+
+# github_issue_comments
+
+
+@pytest.mark.asyncio
+async def test_issue_comments_renders_newest_limit_in_order_and_caps_bodies():
+    comments = [
+        {"author": {"login": f"u{i}"}, "createdAt": f"2026-08-{i:02d}", "body": f"c{i} " + "z" * 1500}
+        for i in range(1, 6)
+    ]
+    mock = AsyncMock(return_value=(0, json.dumps({"comments": comments}), ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _tool("github_issue_comments").ainvoke({"repo": "owner/name", "number": 7, "limit": 2})
+    assert mock.call_args.args[0] == ["issue", "view", "7", "--repo", "owner/name", "--json", "comments"]
+    assert out.startswith("5 comment(s) on owner/name#7 — showing the last 2:")
+    assert "--- u4 · 2026-08-04" in out and "--- u5 · 2026-08-05" in out and "u3" not in out
+    assert out.index("u4") < out.index("u5")  # chronological
+    assert "z" * 1000 not in out and "…" in out  # each body capped at 1000
+
+
+@pytest.mark.asyncio
+async def test_issue_comments_empty_and_odd_rows():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, '{"comments": []}', ""))):
+        assert (
+            await _tool("github_issue_comments").ainvoke({"repo": "owner/name", "number": 1})
+        ) == "No comments on owner/name#1."
+    odd = json.dumps({"comments": [None, {"author": None, "createdAt": None, "body": None}]})
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, odd, ""))):
+        out = await _tool("github_issue_comments").ainvoke({"repo": "owner/name", "number": 1})
+    assert "1 comment(s)" in out and "--- ? · ?\n(empty)" in out
+
+
+# github_search_issues
+
+
+@pytest.mark.asyncio
+async def test_search_issues_argv_and_render():
+    hits = json.dumps([{"number": 23, "title": "Validate default_repo", "state": "closed", "url": "u23"}])
+    mock = AsyncMock(return_value=(0, hits, ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _tool("github_search_issues").ainvoke(
+            {"repo": "owner/name", "query": " default_repo typo ", "state": "closed", "limit": 5}
+        )
+    argv = mock.call_args.args[0]
+    assert argv[:4] == ["search", "issues", "--repo", "owner/name"] and argv[4] == "default_repo typo"
+    assert argv[argv.index("--limit") + 1] == "5" and argv[argv.index("--state") + 1] == "closed"
+    assert (
+        out
+        == "1 closed issue(s) in owner/name matching 'default_repo typo':\n  #23 [closed] Validate default_repo — u23"
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_issues_all_state_omits_the_flag_and_validates():
+    """gh's --state is open|closed only — `all` means no filter (verified against gh 2.92)."""
+    mock = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _tool("github_search_issues").ainvoke({"repo": "owner/name", "query": "x", "state": "all"})
+    assert "--state" not in mock.call_args.args[0]
+    assert out == "No all issues in owner/name match 'x' — nothing to dedupe against."
+    assert "query` is empty" in (await _tool("github_search_issues").ainvoke({"repo": "owner/name", "query": "  "}))
+    assert "state must be" in (
+        await _tool("github_search_issues").ainvoke({"repo": "owner/name", "query": "x", "state": "merged"})
+    )
+    mock.assert_called_once()
+
+
+def test_search_issues_description_says_dedupe_before_filing():
+    assert "DEDUPE BEFORE FILING" in _tool("github_search_issues").description
+    assert (
+        "duplicate"
+        in {t.name: t for t in __import__("ghplugin.write_tools", fromlist=["get_write_tools"]).get_write_tools()}[
+            "github_create_issue"
+        ].description
+    )

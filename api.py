@@ -19,13 +19,16 @@ as whom — the views render a setup card from it when something's missing, and
 from __future__ import annotations
 
 import asyncio
-import json
 
-from .gh_cli import bad_repo, check_gh_error, resolve_gh, run_gh
+from .gh_cli import bad_repo, check_gh_error, parse_json, resolve_gh, run_gh
 
 # The JSON fields we ask `gh` for — kept lean: enough for a board row + the detail link.
 _ISSUE_FIELDS = "number,title,state,author,labels,url,createdAt,comments"
-_PR_FIELDS = "number,title,state,author,labels,url,createdAt,isDraft,headRefName,reviewDecision"
+# `baseRefName` + `mergeStateStatus` are for `github_list_prs` (read_tools reuses fetch_prs);
+# the board rows simply ignore them.
+_PR_FIELDS = (
+    "number,title,state,author,labels,url,createdAt,isDraft,headRefName,baseRefName,reviewDecision,mergeStateStatus"
+)
 
 
 def gh_available() -> bool:
@@ -57,16 +60,16 @@ async def fetch_issues(repo: str, state: str = "open", limit: int = 30) -> dict:
     )
     if gh_err := check_gh_error(rc, serr, repo=repo):
         return {"error": gh_err}
-    try:
-        return {"items": json.loads(out or "[]")}
-    except json.JSONDecodeError:
-        return {"error": f"Error: could not parse gh output: {out[:200]}"}
+    items, perr = parse_json(out or "[]", list)  # a non-list body is an error, never a crash
+    return {"error": perr} if perr else {"items": items}
 
 
 async def fetch_prs(repo: str, state: str = "open", limit: int = 30) -> dict:
     """List pull requests for ``repo`` as ``{"items": [...]}`` (or ``{"error": "..."}``).
 
-    Each item is the raw `gh pr list --json` row (adds isDraft/headRefName/reviewDecision).
+    Each item is the raw `gh pr list --json` row (adds isDraft/headRefName/baseRefName/
+    reviewDecision/mergeStateStatus). Shared by the board's /prs route and the
+    `github_list_prs` tool, so the two can never disagree about a PR's state.
     """
     if err := bad_repo(repo):
         return {"error": err}
@@ -79,10 +82,8 @@ async def fetch_prs(repo: str, state: str = "open", limit: int = 30) -> dict:
     )
     if gh_err := check_gh_error(rc, serr, repo=repo):
         return {"error": gh_err}
-    try:
-        return {"items": json.loads(out or "[]")}
-    except json.JSONDecodeError:
-        return {"error": f"Error: could not parse gh output: {out[:200]}"}
+    items, perr = parse_json(out or "[]", list)  # a non-list body is an error, never a crash
+    return {"error": perr} if perr else {"items": items}
 
 
 def _repos(cfg: dict) -> list[str]:

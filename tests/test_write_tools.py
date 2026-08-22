@@ -17,6 +17,14 @@ def _create_issue():
     return {t.name: t for t in get_write_tools()}["github_create_issue"]
 
 
+# A body that clears the gate the tool shares with `/issue` (v0.7.0): >= 80 collapsed
+# chars + a Problem section (+ repro for a bug / direction-or-acceptance for a feature).
+_OK_BODY = (
+    "## Problem\nIt broke on empty input and the whole pipeline raised instead of "
+    "handling it gracefully.\n## Acceptance\nEmpty input is handled without raising."
+)
+
+
 def _labels_in(args: list[str]) -> list[str]:
     """The value following each ``--label`` flag, in order."""
     return [args[i + 1] for i, a in enumerate(args) if a == "--label"]
@@ -27,12 +35,12 @@ async def test_returns_issue_url():
     tool = _create_issue()
     fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/42\n", ""))
     with patch("ghplugin.write_tools.run_gh", fake):
-        out = await tool.ainvoke({"repo": "o/n", "title": "Bug", "body": "It broke"})
+        out = await tool.ainvoke({"repo": "o/n", "title": "Bug", "body": _OK_BODY})
     assert out == "https://github.com/o/n/issues/42"
     args = fake.call_args.args[0]
     assert args[:4] == ["issue", "create", "--repo", "o/n"]
     assert "--title" in args and args[args.index("--title") + 1] == "Bug"
-    assert "--body" in args and args[args.index("--body") + 1] == "It broke"
+    assert "--body" in args and args[args.index("--body") + 1] == _OK_BODY
 
 
 async def test_no_labels_omits_label_flag():
@@ -40,7 +48,7 @@ async def test_no_labels_omits_label_flag():
     tool = _create_issue()
     fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/1", ""))
     with patch("ghplugin.write_tools.run_gh", fake):
-        await tool.ainvoke({"repo": "o/n", "title": "t"})
+        await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY})
     assert "--label" not in fake.call_args.args[0]
 
 
@@ -49,7 +57,7 @@ async def test_labels_split_into_separate_flags():
     tool = _create_issue()
     fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/7", ""))
     with patch("ghplugin.write_tools.run_gh", fake):
-        await tool.ainvoke({"repo": "o/n", "title": "t", "labels": "bug, enhancement ,"})
+        await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY, "labels": "bug, enhancement ,"})
     assert _labels_in(fake.call_args.args[0]) == ["bug", "enhancement"]
 
 
@@ -69,8 +77,76 @@ async def test_gh_failure_returns_check_gh_error():
     tool = _create_issue()
     fake = AsyncMock(return_value=(1, "", "could not create issue: forbidden"))
     with patch("ghplugin.write_tools.run_gh", fake):
-        out = await tool.ainvoke({"repo": "o/n", "title": "t"})
+        out = await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY})
     assert out == "Error (gh exit 1): could not create issue: forbidden"
+
+
+# ── the body gate (v0.7.0) — the same one `/issue` enforces ──────────────────────
+
+
+async def test_create_issue_refuses_a_gate_failing_body_with_the_scaffold():
+    """A minimal body is NOT posted; the tool says what's missing and hands back the
+    scaffold — exactly what the /issue command does (gh_issue.missing_sections)."""
+    tool = _create_issue()
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "title": "Bug", "body": "It broke"})
+    assert out.startswith("Not filed — the issue body is missing ")
+    assert "a substantive description (>= 80 chars)" in out
+    assert "a Problem / What's-wrong / Motivation section" in out
+    assert "## Problem" in out and "## Acceptance" in out  # the generic scaffold
+    fake.assert_not_called()  # never shells out when the gate fails
+
+
+async def test_create_issue_bug_kind_needs_repro_and_adds_the_bug_label():
+    tool = _create_issue()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/9", ""))
+    no_repro = (
+        "## Problem\nThe parser crashes on empty input and the whole pipeline raises "
+        "instead of handling it gracefully — a user-visible failure."
+    )
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "title": "Crash", "body": no_repro, "kind": "bug"})
+    assert out.startswith("Not filed") and "Steps to reproduce" in out and "## Steps to reproduce" in out
+    fake.assert_not_called()
+    with_repro = no_repro + "\n## Steps to reproduce\nRun it with an empty string."
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "title": "Crash", "body": with_repro, "kind": "bug", "labels": "p0"})
+    assert out.endswith("/issues/9")
+    assert _labels_in(fake.call_args.args[0]) == ["bug", "p0"]  # type label first, like /issue
+
+
+async def test_create_issue_feature_kind_needs_direction_or_acceptance():
+    tool = _create_issue()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/10", ""))
+    body = "## Motivation\nWe need this capability badly for the next release cycle to ship on time."
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "title": "Feat", "body": body, "kind": "feature"})
+    assert out.startswith("Not filed") and "Proposed-direction or Acceptance" in out
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke(
+            {"repo": "o/n", "title": "Feat", "body": body + "\n## Acceptance\nIt ships.", "kind": "feature"}
+        )
+    assert out.endswith("/issues/10") and _labels_in(fake.call_args.args[0]) == ["enhancement"]
+
+
+async def test_create_issue_rejects_an_unknown_kind():
+    out = await _create_issue().ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY, "kind": "epic"})
+    assert out.startswith("Error: kind must be")
+
+
+async def test_create_issue_gate_matches_the_issue_command():
+    """One gate, two entry points: whatever /issue refuses, the tool refuses, and vice versa."""
+    from ghplugin.gh_issue import missing_sections
+
+    for kind, body in (("generic", "too short"), ("bug", _OK_BODY), ("feature", _OK_BODY), ("generic", _OK_BODY)):
+        tool_out = (
+            await _create_issue().ainvoke({"repo": "o/n", "title": "t", "body": body, "kind": kind})
+            if missing_sections(body, kind)
+            else None
+        )
+        if missing_sections(body, kind):
+            assert tool_out.startswith("Not filed")
 
 
 def _comment():

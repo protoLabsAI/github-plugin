@@ -86,6 +86,12 @@ def _scaffold(kind: str) -> str:
     return {"bug": _BUG_SCAFFOLD, "feature": _FEATURE_SCAFFOLD}.get(kind, _GENERIC_SCAFFOLD)
 
 
+def scaffold_for(kind: str) -> str:
+    """The fill-in scaffold for an issue ``kind`` — what both the `/issue` command and
+    the `github_create_issue` tool hand back when the body fails the gate."""
+    return _scaffold(kind)
+
+
 def missing_sections(body: str, kind: str) -> list[str]:
     """The gate-required sections absent from ``body`` for this issue ``kind``."""
     miss: list[str] = []
