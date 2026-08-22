@@ -254,3 +254,120 @@ def test_manifest_declares_board_and_widget_views():
     assert new_issue["utility"]["info"]  # a util-bar pill with hover info
     assert new_issue["palette"]["path"] == "/plugins/github/new-issue"  # distinct ⌘K page
     assert new_issue["path"] == "/plugins/github/new-issue"
+
+
+# --- v0.6.0: /status, the named default_repo error (#23), the setup card -------
+
+
+def _status_gh(*, auth=(0, '{"hosts":{}}', "You are not logged into any GitHub hosts.")):
+    async def run_gh(args, timeout=None, **kw):
+        if args == ["--version"]:
+            return (0, "gh version 2.92.0 (2026-04-28)", "")
+        if args[:2] == ["auth", "status"]:
+            return auth
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    return run_gh
+
+
+def test_status_route_shape_when_unauthenticated():
+    with (
+        patch("ghplugin.status.resolve_gh", return_value="/usr/local/bin/gh"),
+        patch("ghplugin.status.run_gh", new=AsyncMock(side_effect=_status_gh())),
+    ):
+        body = TestClient(_app()).get("/api/plugins/github/status").json()
+    assert body["gh_path"] == "/usr/local/bin/gh" and body["gh_version"] == "2.92.0"
+    assert body["authenticated"] is False and body["login"] is None
+    assert body["error"] == "not logged in"
+    assert body["default_repo"] == "o/n" and body["repos"] == ["o/n", "o/m"]
+    assert body["default_repo_error"] is None
+    for k in ("host", "token_source"):
+        assert k in body
+
+
+def test_status_route_when_gh_is_missing_never_errors():
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        r = TestClient(_app()).get("/api/plugins/github/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["gh_path"] is None and body["authenticated"] is False and "not installed" in body["error"]
+
+
+def test_status_route_authenticated():
+    ok = '{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"kj"}]}}'
+    with (
+        patch("ghplugin.status.resolve_gh", return_value="/usr/bin/gh"),
+        patch("ghplugin.status.run_gh", new=AsyncMock(side_effect=_status_gh(auth=(0, ok, "")))),
+    ):
+        body = TestClient(_app()).get("/api/plugins/github/status").json()
+    assert body["authenticated"] is True and body["login"] == "kj" and body["host"] == "github.com"
+
+
+def test_config_names_a_malformed_default_repo_and_keeps_it_out_of_the_picker():
+    """#23 — `default_repo: protoLabsAI` (no slash) used to be fed straight to `gh`. Now it's
+    the named error, the picker carries only well-formed entries, and the default falls
+    through to the first good one."""
+    body = (
+        TestClient(_app({"repos": ["o/good"], "default_repo": "protoLabsAI"})).get("/api/plugins/github/config").json()
+    )
+    assert body["default_repo_error"].startswith("Error: github.default_repo must be 'owner/name' (got 'protoLabsAI')")
+    assert body["repos"] == ["o/good"] and body["default_repo"] == "o/good"
+
+
+def test_config_default_repo_error_is_none_when_well_formed_or_blank():
+    assert TestClient(_app()).get("/api/plugins/github/config").json()["default_repo_error"] is None
+    assert (
+        TestClient(_app({"repos": [], "default_repo": ""}))
+        .get("/api/plugins/github/config")
+        .json()["default_repo_error"]
+        is None
+    )
+
+
+def test_status_route_carries_the_default_repo_error_too():
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        body = TestClient(_app({"repos": [], "default_repo": "nope"})).get("/api/plugins/github/status").json()
+    assert "must be 'owner/name'" in body["default_repo_error"]
+
+
+def test_create_issue_route_names_a_malformed_default_when_nothing_else_resolves():
+    fake = AsyncMock()
+    with patch("ghplugin.gh_issue.run_gh", fake):
+        body = (
+            TestClient(_app({"repos": [], "default_repo": "just-owner"}))
+            .post("/api/plugins/github/issue", json={"title": "T", "body": "x"})
+            .json()
+        )
+    assert body["ok"] is False and body["error"].startswith(
+        "Error: github.default_repo must be 'owner/name' (got 'just-owner')"
+    )
+    fake.assert_not_called()
+
+
+def test_pages_render_the_setup_card_from_status_inside_the_kit_boot():
+    """Both views fetch /status ONLY from inside the kit's boot (post-handshake, #2926) and
+    carry the setup card with the three remedies: install gh / gh auth login / the token."""
+    from ghplugin.view import NEW_ISSUE_PAGE, PAGE
+
+    for page in (PAGE, NEW_ISSUE_PAGE):
+        assert "/api/plugins/github/status" in page
+        assert 'id="setup"' in page and "function setupCard" in page
+        # the fetch is reached from boot(), which the kit invokes — not at top level
+        boot_body = page.split("async function boot(){", 1)[1].split("\n  }", 1)[0]
+        assert "checkStatus();" in boot_body
+        assert "cli.github.com" in page and "gh auth login" in page and "github.token" in page
+        assert "Default repo is malformed" in page  # #23 surfaces in the views too
+        assert "No repositories configured" in page  # the existing empty state stays
+
+
+def test_register_wires_the_data_router_to_the_live_config(make_registry):
+    """register() passes a getter (not the snapshot) so the routes see config edits."""
+    reg = make_registry({"repos": ["o/n"], "default_repo": "o/n"})
+    register(reg)
+    data = next(r["router"] for r in reg.routers if r["prefix"] == "/api/plugins/github")
+    app = FastAPI()
+    app.include_router(data, prefix="/api/plugins/github")
+    c = TestClient(app)
+    assert c.get("/api/plugins/github/config").json()["repos"] == ["o/n"]
+    reg.config["repos"] = ["o/n", "o/added"]  # the (shared) config dict is edited after register()
+    assert c.get("/api/plugins/github/config").json()["repos"] == ["o/n", "o/added"]
