@@ -1,21 +1,23 @@
 """GitHub READ tools over `gh` — always registered (read-only is the safe default).
 
-Six are ported from protoAgent's tools/github_tools.py (PRs, issues, diffs, CI). Two
-new ones (`github_read_file`, `github_repo_contents`) are STUBBED — the team builds
-them out (see the TODOs). Each tool takes an `owner/name` repo — or falls back to the
-configured default when it's omitted — and degrades to a readable `Error: ...` string
-when `gh`/auth is unavailable.
+Eleven tools, all implemented: six ported from protoAgent's tools/github_tools.py
+(PRs, issues, diffs, CI), the repo-content readers (`github_read_file`,
+`github_read_pr_file`, `github_repo_contents`, `github_path_exists`), `github_pr_diff`,
+and `github_status` (the self-diagnosis probe — is `gh` installed / authenticated).
+Each tool takes an `owner/name` repo — or falls back to the configured default when
+it's omitted (a LIVE getter, so a Settings edit or an onboarded project is seen by the
+next call) — and degrades to a readable, classified `Error: ...` string (not
+authenticated / repo not found / rate-limited / `gh` missing) instead of raising.
 """
 
 from __future__ import annotations
 
-import json
 import re
 
 from langchain_core.tools import tool
 
-from .gh_cli import bad_repo, check_gh_error, run_gh
-from .gh_issue import resolve_repo
+from .gh_cli import bad_repo, check_gh_error, dicts, parse_json, run_gh
+from .gh_issue import current_default, default_repo_error, resolve_repo
 
 # Error-relevant lines to surface from a failed CI log (github_run_failure).
 _CI_ERR_RE = re.compile(
@@ -25,9 +27,17 @@ _CI_ERR_RE = re.compile(
 )
 
 
-def get_read_tools(default_repo: str = "") -> list:
-    """Build the read tools. ``default_repo`` (``owner/name``) is used whenever a tool's
-    ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it."""
+def get_read_tools(default_repo="", repos=None) -> list:
+    """Build the read tools. ``default_repo`` (``owner/name``, or a zero-arg getter
+    returning it — the live-config case) is used whenever a tool's ``repo`` arg is
+    omitted, so an agent with one configured repo needn't repeat it. ``repos`` (a list
+    or a getter) is the picker list, surfaced by ``github_status`` only."""
+
+    def _repos() -> list[str]:
+        try:
+            return list((repos() if callable(repos) else repos) or [])
+        except Exception:  # noqa: BLE001
+            return []
 
     @tool
     async def github_get_pr(number: int, repo: str = "") -> str:
@@ -51,13 +61,12 @@ def get_read_tools(default_repo: str = "") -> list:
                 "number,title,state,author,body,additions,deletions,files,url,headRefName,baseRefName",
             ]
         )
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
-        try:
-            d = json.loads(out)
-        except json.JSONDecodeError:
-            return f"Error: could not parse gh output: {out[:200]}"
-        files = ", ".join(f.get("path", "?") for f in (d.get("files") or [])[:20])
+        d, perr = parse_json(out, dict)
+        if perr:
+            return perr
+        files = ", ".join(str(f.get("path", "?")) for f in dicts(d.get("files"))[:20])
         return (
             f"PR #{d.get('number')} [{d.get('state')}] {d.get('title')}\n"
             f"branch: {d.get('headRefName', '?')} -> {d.get('baseRefName', '?')}\n"
@@ -80,13 +89,12 @@ def get_read_tools(default_repo: str = "") -> list:
         rc, out, serr = await run_gh(
             ["issue", "view", str(number), "--repo", repo, "--json", "number,title,state,author,labels,body,url"]
         )
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
-        try:
-            d = json.loads(out)
-        except json.JSONDecodeError:
-            return f"Error: could not parse gh output: {out[:200]}"
-        labels = ", ".join(lbl.get("name", "") for lbl in (d.get("labels") or []))
+        d, perr = parse_json(out, dict)
+        if perr:
+            return perr
+        labels = ", ".join(str(lbl.get("name", "")) for lbl in dicts(d.get("labels")))
         return (
             f"Issue #{d.get('number')} [{d.get('state')}] {d.get('title')}\n"
             f"by {(d.get('author') or {}).get('login', '?')} | labels: {labels or '(none)'} | "
@@ -122,17 +130,17 @@ def get_read_tools(default_repo: str = "") -> list:
                 "number,title,state,labels",
             ]
         )
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
-        try:
-            items = json.loads(out)
-        except json.JSONDecodeError:
-            return f"Error: could not parse gh output: {out[:200]}"
+        items, perr = parse_json(out, list)
+        if perr:
+            return perr
+        items = dicts(items)
         if not items:
             return f"No {state} issues in {repo}."
         lines = [f"{len(items)} {state} issue(s) in {repo}:"]
         for it in items:
-            labels = ",".join(lbl.get("name", "") for lbl in (it.get("labels") or []))
+            labels = ",".join(str(lbl.get("name", "")) for lbl in dicts(it.get("labels")))
             lines.append(
                 f"  #{it.get('number')} [{it.get('state')}] {it.get('title')}" + (f"  ({labels})" if labels else "")
             )
@@ -153,7 +161,7 @@ def get_read_tools(default_repo: str = "") -> list:
         rc, out, serr = await run_gh(
             ["api", f"repos/{repo}/commits/{ref}", "-H", "Accept: application/vnd.github.diff"]
         )
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         diff = out.strip()
         if not diff:
@@ -175,7 +183,7 @@ def get_read_tools(default_repo: str = "") -> list:
         if err := bad_repo(repo):
             return err
         rc, out, serr = await run_gh(["pr", "diff", str(number), "--repo", repo])
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         diff = out.strip()
         if not diff:
@@ -211,12 +219,12 @@ def get_read_tools(default_repo: str = "") -> list:
         if branch.strip():
             args += ["--branch", branch.strip()]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
-        try:
-            runs = json.loads(out)
-        except json.JSONDecodeError:
-            return f"Error: could not parse gh output: {out[:200]}"
+        runs, perr = parse_json(out, list)
+        if perr:
+            return perr
+        runs = dicts(runs)
         if not runs:
             return f"No recent runs for {repo}" + (f" on {branch}" if branch.strip() else "")
         lines = [
@@ -240,7 +248,7 @@ def get_read_tools(default_repo: str = "") -> list:
             return err
         cap = max(5, min(int(max_lines), 80))
         rc, out, serr = await run_gh(["run", "view", str(run_id), "--repo", repo, "--log-failed"], timeout=60)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         raw = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
         seen: set = set()
@@ -257,21 +265,17 @@ def get_read_tools(default_repo: str = "") -> list:
             return f"Run {run_id} in {repo}: no failed-step log lines (run may not have failed, or its logs expired)."
         return f"{repo} run {run_id} — failure log ({len(picked)} line(s)):\n" + "\n".join(picked)
 
-    # ── NEW read tools — STUBBED. Build these out (this is what lets an agent research
-    # any repo over `gh` without registering an fs project per repo). ────────────────
+    # ── Repo-content readers — what lets an agent research ANY repo over `gh` without
+    # registering an fs project per repo. ───────────────────────────────────────────
     @tool
     async def github_read_file(path: str, repo: str = "", ref: str = "") -> str:
-        """Read a single file's contents from a GitHub repo.
+        """Read a single file's raw contents from a GitHub repo (capped at 20000 chars).
 
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            path: Path to the file within the repo (e.g. ``docs/guide.md``).
+            path: Path to the file within the repo (e.g. ``docs/guide.md``). For a directory
+                use ``github_repo_contents``; for a file as it is IN a PR use ``github_read_pr_file``.
             ref: Optional branch / tag / SHA (default: the repo's default branch).
-
-        TODO(team): implement via `gh api repos/{repo}/contents/{path}?ref={ref}` with
-        `Accept: application/vnd.github.raw` (returns the raw file body), or
-        `gh api .../contents/... --jq .content | base64 -d`. Validate repo with
-        bad_repo(); cap the returned size; return a readable Error on failure.
         """
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
@@ -280,7 +284,7 @@ def get_read_tools(default_repo: str = "") -> list:
         if ref.strip():
             args += ["-f", f"ref={ref}"]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         if len(out) > 20000:
             out = out[:20000] + "\n… (truncated at 20000 chars)"
@@ -308,7 +312,7 @@ def get_read_tools(default_repo: str = "") -> list:
         # DEFAULT branch, i.e. the pre-PR file: it then "confirms" that symbols the
         # PR adds don't exist, which reads as a blocker finding on correct code.
         rc, out, serr = await run_gh(["api", f"repos/{repo}/pulls/{number}", "--jq", ".head.sha"])
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         head = out.strip()
         if not head:
@@ -323,7 +327,7 @@ def get_read_tools(default_repo: str = "") -> list:
                 f"ref={head}",
             ]
         )
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             # Fail LOUD, never fall back to the default branch: a silent fallback is
             # exactly the bug this tool exists to prevent.
             return f"Error reading {path} at {repo}#{number} head {head[:12]}: {gh_err}"
@@ -368,7 +372,7 @@ def get_read_tools(default_repo: str = "") -> list:
                 + " — the path does not exist."
             )
         return (
-            check_gh_error(rc, serr)
+            check_gh_error(rc, serr, repo=repo)
             or f"Error (gh exit {rc}): could not verify {repo}/{clean} — treat as UNVERIFIED (a Gap, not a finding)."
         )
 
@@ -388,12 +392,18 @@ def get_read_tools(default_repo: str = "") -> list:
         if ref.strip():
             args += ["-f", f"ref={ref}"]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
-        try:
-            items = json.loads(out)
-        except json.JSONDecodeError:
-            return f"Error: could not parse gh output: {out[:200]}"
+        items, perr = parse_json(out, (dict, list))
+        if perr:
+            return perr
+        # The contents API returns a LIST for a directory but a single OBJECT for a
+        # file (or symlink/submodule). Iterating the object raised AttributeError
+        # through the tool layer and killed the whole agent turn — say what it is.
+        if isinstance(items, dict):
+            kind = items.get("type") or "file"
+            return f"Error: '{path or '.'}' is a {kind}, not a directory — use github_read_file to read it."
+        items = dicts(items)
         if not items:
             return f"No contents in {repo}/{path or '.'}."
         type_map = {"file": "FILE", "dir": "DIR ", "symlink": "LINK", "submodule": "SUB "}
@@ -404,6 +414,23 @@ def get_read_tools(default_repo: str = "") -> list:
             size = "0" if etype == "dir" else str(entry.get("size", 0))
             lines.append(f"{t:4s} {size:>8s}  {entry.get('name', '?')}  ({entry.get('path', '')})")
         return "\n".join(lines)
+
+    @tool
+    async def github_status() -> str:
+        """Check whether the GitHub CLI is installed and authenticated, and which repo the
+        other github_* tools default to. Call this FIRST when any github_* tool returns an
+        authentication / not-found / CLI error, or before GitHub work on a fresh machine —
+        it says exactly what's wrong and what the operator must do (install `gh`, run
+        `gh auth login`, or paste a token in Settings ▸ GitHub). Takes no arguments.
+        """
+        from .status import compute_status, summarize_status
+
+        default = current_default(default_repo)
+        st = await compute_status(default, _repos())
+        text = summarize_status(st)
+        if bad := default_repo_error(default):
+            text += f" NOTE: {bad}"
+        return text
 
     return [
         github_get_pr,
@@ -417,4 +444,5 @@ def get_read_tools(default_repo: str = "") -> list:
         github_read_file,
         github_read_pr_file,
         github_repo_contents,
+        github_status,
     ]
