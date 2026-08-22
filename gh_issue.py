@@ -161,16 +161,26 @@ def resolve_repo(explicit: str | None, default_repo="") -> str | None:
     return None
 
 
-def effective_default_repo(default_repo: str, repos: list[str] | None = None) -> str:
+def effective_default_repo(default_repo: str, repos=None) -> str:
     """The preselected default repo for the dialog + the ``/issue`` command: the
     explicit ``github.default_repo`` if set, else the first entry in the
     ``github.repos`` picker list (explicit ∪ registry ∪ checkout remotes), else
     ``""`` (env still applies via ``resolve_repo``). Keeps the command, the tools
     and the dialog agreeing on the default. A malformed explicit default is returned
     as-is so the caller's ``bad_repo`` / ``default_repo_error`` names it instead of
-    silently routing to the next candidate."""
+    silently routing to the next candidate.
+
+    ``repos`` may be a list OR a zero-arg getter — the getter is only called when no
+    explicit default is set, so computing the picker (which may fork git to read
+    checkout remotes) is skipped on the common configured path."""
     if (default_repo or "").strip():
         return default_repo.strip()
+    if callable(repos):
+        try:
+            repos = repos()
+        except Exception:  # noqa: BLE001 — a broken picker getter reads as "no picker"
+            log.debug("[github] repos getter failed", exc_info=True)
+            repos = []
     for r in repos or []:
         if (r or "").strip():
             return r.strip()

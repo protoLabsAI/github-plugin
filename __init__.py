@@ -65,12 +65,15 @@ def register(registry) -> None:
     def current_default_repo() -> str:
         """The default the tools / `/issue` fall back to when no repo is passed —
         the configured `default_repo`, else the first of `repos` (same resolution
-        as the board), evaluated per call."""
-        return effective_default_repo(str(current_cfg().get("default_repo") or ""), current_repos())
+        as the board), evaluated per call. `current_repos` is passed as a GETTER so
+        the picker (and its git-remote parsing) is only computed when no explicit
+        default is set."""
+        return effective_default_repo(str(current_cfg().get("default_repo") or ""), current_repos)
 
-    # The `github.token` secret (Settings ▸ GitHub) — injected into every `gh` run as
-    # GH_TOKEN, winning over an ambient env token. Read live, so a pasted token works
-    # without a restart. Process-wide by design: one `gh` runner per process.
+    # The `github.token` secret (Settings ▸ GitHub) — when non-empty, injected into every
+    # `gh` run as GH_TOKEN (winning over an ambient env token); when empty the env is
+    # passed through untouched so gh's own precedence applies. Read live, so a pasted
+    # token works without a restart. Process-wide by design: one `gh` runner per process.
     set_token_getter(lambda: str(current_cfg().get("token") or ""))
 
     # READ tools — always available (they return an error string if `gh`/auth is missing).
@@ -78,7 +81,7 @@ def register(registry) -> None:
     try:
         from .read_tools import get_read_tools
 
-        read = get_read_tools(current_default_repo, current_repos)
+        read = get_read_tools(current_default_repo, current_repos, registry=registry)
         for t in read:
             registry.register_tool(t)
         n_read = len(read)
@@ -134,7 +137,7 @@ def register(registry) -> None:
             # The data router reads config per request through the same live getter,
             # so a repo/default_repo edit shows in the board with no server restart — a
             # hot-reload can't re-mount this router, but reading config per request does.
-            registry.register_router(build_data_router(current_cfg), prefix="/api/plugins/github")
+            registry.register_router(build_data_router(current_cfg, registry=registry), prefix="/api/plugins/github")
             view = True
         except Exception:  # noqa: BLE001
             log.exception("[github] registering the board view failed")

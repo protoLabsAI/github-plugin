@@ -31,8 +31,10 @@ config:
                                # Must be owner/name — anything else is a named error in
                                # the views / tools (#23), never fed to `gh`.
   token: ""                    # OPTIONAL personal access token (secret → secrets.yaml).
-                               # Injected into every `gh` run as GH_TOKEN, winning over an
-                               # ambient GITHUB_TOKEN/GH_TOKEN; `gh auth login` works too.
+                               # When set, injected into every `gh` run as GH_TOKEN and
+                               # wins; when blank the env passes through untouched and
+                               # gh's own order applies (GH_TOKEN > GITHUB_TOKEN > the
+                               # `gh auth login` keyring).
   repos: []                    # repo picker list (each owner/name) for /issue + views.
                                # The host's managed-projects registry (ADR 0095,
                                # protoAgent 0.115.0+) is ALWAYS added: every `projects:`
@@ -56,7 +58,7 @@ secrets: [token]
 settings:
   - {key: write, label: "Allow write tools (this agent)", type: bool}
   - {key: default_repo, label: "Default repo (owner/name)", type: string, description: "owner/name — used when a tool or /issue omits the repo. Leave blank to fall back to the first picker entry."}
-  - {key: token, label: "GitHub token (PAT) — optional; gh auth login also works", type: secret, description: "A personal access token with repo scope. Wins over GITHUB_TOKEN/GH_TOKEN in the environment; leave blank to use `gh auth login`'s keyring login."}
+  - {key: token, label: "GitHub token (PAT) — optional; gh auth login also works", type: secret, description: "A personal access token with repo scope. When set it is used for every gh call (over any GH_TOKEN/GITHUB_TOKEN in the environment); leave blank to let gh use the environment or its own `gh auth login` keyring login."}
   - {key: repos, label: "Repo picker list", type: string_list}
 
 # Console views (ADR 0026/0057) — sandboxed iframes the plugin serves itself (api.py).
@@ -78,9 +80,9 @@ public_paths:
   - /plugins/github/view
   - /plugins/github/new-issue
 
-# Auth, in precedence order: the `token` secret above (Settings ▸ GitHub) > GITHUB_TOKEN /
-# GH_TOKEN from the env > `gh`'s own keyring login (`gh auth login`). Nothing is needed
-# for public-repo reads at low volume. `GET /api/plugins/github/status` + the
+# Auth: a non-empty `token` secret (Settings ▸ GitHub) is injected and wins; otherwise
+# the env passes through and gh's own precedence applies (GH_TOKEN > GITHUB_TOKEN >
+# the `gh auth login` keyring). Nothing is needed for public-repo reads at low volume. `GET /api/plugins/github/status` + the
 # `github_status` tool report which applies; the views show a setup card when none does.
 
 # Declarative transparency (shown in the console; not yet enforced).

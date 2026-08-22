@@ -18,8 +18,8 @@ as whom — the views render a setup card from it when something's missing, and
 
 from __future__ import annotations
 
+import asyncio
 import json
-import shutil
 
 from .gh_cli import bad_repo, check_gh_error, resolve_gh, run_gh
 
@@ -29,8 +29,9 @@ _PR_FIELDS = "number,title,state,author,labels,url,createdAt,isDraft,headRefName
 
 
 def gh_available() -> bool:
-    """Whether the `gh` CLI can be found (PATH, then the usual install dirs)."""
-    return resolve_gh() is not None or shutil.which("gh") is not None
+    """Whether the `gh` CLI can be found (PATH, then the usual install dirs) — the
+    same resolver the runner uses, so this and a tool can never disagree."""
+    return resolve_gh() is not None
 
 
 def _norm_state(state: str) -> str | None:
@@ -139,7 +140,7 @@ def build_view_router():
     return router
 
 
-def build_data_router(cfg):
+def build_data_router(cfg, registry=None):
     """The board's DATA routes — mounted under the GATED ``/api/plugins/github`` prefix.
 
     ``cfg`` is either the config dict OR a zero-arg callable returning it. Pass a callable
@@ -148,27 +149,39 @@ def build_data_router(cfg):
     picks up the freshly-saved repos/default_repo. A plain dict (tests, older host) is a
     fixed snapshot. ``/issue`` reuses the SAME gate-checked `file_issue` path as the
     `/issue` chat command, so the dialog and the command can never diverge.
+
+    ``registry`` (optional) is the host registry: ``/status`` reports its result to the
+    ``report_setup_gap`` seam through it, so the operator banner clears on the very
+    Re-check that sees `gh` installed / signed in. ``None`` ⇒ status only.
+
+    The picker/default resolution may parse git remotes (blocking, cached) — every
+    route runs it in a worker thread, never on the event loop.
     """
     from fastapi import APIRouter, Body
 
     from .gh_issue import IssueRequest, file_issue, labels_for, resolve_repo
-    from .status import compute_status
+    from .status import compute_and_report
 
     get_cfg = cfg if callable(cfg) else (lambda: cfg)
+
+    async def _resolved() -> dict:
+        current = get_cfg() or {}
+        return await asyncio.to_thread(resolve_config, current)
 
     router = APIRouter()
 
     @router.get("/config")
     async def _config() -> dict:
-        resolved = resolve_config(get_cfg() or {})
+        resolved = await _resolved()
         return {**resolved, "gh_available": gh_available()}
 
     @router.get("/status")
     async def _status() -> dict:
         """The first-run probe: `gh` path + version, auth state (login/host), the token
-        source, and the resolved repos — never raises (a failure is ``error``)."""
-        resolved = resolve_config(get_cfg() or {})
-        st = await compute_status(resolved["default_repo"], resolved["repos"])
+        source, and the resolved repos — never raises (a failure is ``error``). Reports
+        to the host's setup-gap seam (clears on recovery) when a registry was given."""
+        resolved = await _resolved()
+        st = await compute_and_report(registry, resolved["default_repo"], resolved["repos"])
         st["default_repo_error"] = resolved["default_repo_error"]
         return st
 
@@ -182,7 +195,7 @@ def build_data_router(cfg):
 
     @router.post("/issue")
     async def _create_issue(body: dict = Body(...)) -> dict:
-        resolved = resolve_config(get_cfg() or {})
+        resolved = await _resolved()
         kind = (body.get("kind") or "generic").lower()
         if kind not in ("bug", "feature", "generic"):
             kind = "generic"

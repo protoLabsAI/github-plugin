@@ -134,6 +134,55 @@ async def test_every_tool_survives_a_raising_runner(make_registry):
         gh_cli.reset_gh_cache()
 
 
+@pytest.mark.parametrize("exc", ["enoexec", "emfile", "kill-after-exit"])
+async def test_every_tool_survives_a_failing_spawn(make_registry, monkeypatch, exc):
+    """OSError from the spawn (ENOEXEC on a foreign-arch ~/.local/bin/gh, EMFILE) and a
+    ProcessLookupError from kill() after a timeout must all be Error strings (#4)."""
+    import asyncio
+    import errno
+
+    from ghplugin import gh_cli
+
+    tools = _all_tools(make_registry)
+    monkeypatch.setattr(gh_cli, "resolve_gh", lambda: "/fake/gh")
+
+    class _Proc:
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.sleep(10)
+
+        def kill(self):
+            raise ProcessLookupError()
+
+    async def spawn(*a, **k):
+        if exc == "enoexec":
+            raise OSError(errno.ENOEXEC, "Exec format error")
+        if exc == "emfile":
+            raise OSError(errno.EMFILE, "Too many open files")
+        return _Proc()
+
+    monkeypatch.setattr(gh_cli.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(gh_cli, "_COMMAND_TIMEOUT", 0)
+    if exc == "kill-after-exit":
+        # the timeout path: every run_gh call must time out instantly, then kill raises
+        real_wait_for = asyncio.wait_for
+
+        async def instant(coro, timeout=None):
+            return await real_wait_for(coro, timeout=0)
+
+        monkeypatch.setattr(gh_cli.asyncio, "wait_for", instant)
+    # run_gh is looked up at call time in each module; patch the underlying spawn only,
+    # so the REAL run_gh (the no-raise boundary) is what's under test here.
+    with patch("ghplugin.status.resolve_gh", return_value="/fake/gh"):
+        for name, tool in tools.items():
+            try:
+                result = await tool.ainvoke(_ARGS.get(name, {}))
+            except Exception as e:  # noqa: BLE001
+                raise AssertionError(f"{name} RAISED on spawn failure {exc!r}: {type(e).__name__}: {e}") from e
+            assert isinstance(result, str), f"{name} returned {type(result).__name__} on {exc!r}"
+
+
 async def test_repo_contents_on_a_file_says_so(make_registry):
     """The bug that motivated the sweep: a FILE path → dict → was an AttributeError."""
     tools = _all_tools(make_registry)

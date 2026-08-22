@@ -68,6 +68,22 @@ class _LegacyRegistry:
         return [getattr(t, "name", getattr(t, "__name__", "?")) for t in self.tools]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_github_auth(monkeypatch):
+    """Every test starts with no env token, no config-token getter, and no cached gh
+    path — the auth HINT branches on token_source(), so an operator's ambient GH_TOKEN
+    must never leak into an assertion. Tests that want a token set it explicitly."""
+    from ghplugin import gh_cli
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    gh_cli.set_token_getter(None)
+    gh_cli.reset_gh_cache()
+    yield
+    gh_cli.set_token_getter(None)
+    gh_cli.reset_gh_cache()
+
+
 @pytest.fixture
 def make_registry():
     return _Registry

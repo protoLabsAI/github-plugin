@@ -458,3 +458,38 @@ async def test_status_tool_reads_default_and_repos_through_getters():
     with patch("ghplugin.status.resolve_gh", return_value=None):
         out = await tools["github_status"].ainvoke({})
     assert "Default repo: o/live." in out and calls == {"d": 1, "r": 1}
+
+
+@pytest.mark.asyncio
+async def test_status_tool_reports_to_the_setup_gap_seam():
+    """The model's own check is a recovery observation too — it must clear the banner."""
+    calls = []
+
+    class _Seam:
+        def report_setup_gap(self, key, message):
+            calls.append((key, message))
+
+    tools = {t.name: t for t in get_read_tools("o/n", ["o/n"], registry=_Seam())}
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        await tools["github_status"].ainvoke({})
+    assert dict(calls)["gh"] and dict(calls)["auth"] is None
+
+
+@pytest.mark.asyncio
+async def test_path_exists_classifies_before_the_missing_verdict():
+    """An auth / rate-limit / missing-binary failure is UNVERIFIED (the classified error),
+    never MISSING — only a real 404 is a verdict, and it names the inaccessible-repo case."""
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(4, "", "please run: gh auth login"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("Error: GitHub CLI is not authenticated") and "MISSING" not in out
+    with patch(
+        "ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(127, "", "gh CLI is not installed or not on PATH."))
+    ):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("Error: gh CLI is not installed") and "MISSING" not in out
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "HTTP 403: API rate limit exceeded"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("Error: GitHub API rate limit hit")
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "gh: Not Found (HTTP 404)"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("MISSING: owner/name/x") and "repo is inaccessible" in out

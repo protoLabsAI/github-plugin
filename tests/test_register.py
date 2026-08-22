@@ -152,3 +152,26 @@ def test_register_starts_the_setup_probe_only_when_the_host_has_the_seam(make_re
         plain = make_registry({})
         register(plain)  # no seam → no thread
     assert started == []
+
+
+async def test_configured_default_repo_skips_the_picker_computation(make_registry, monkeypatch):
+    """With default_repo set, a tool call must not compute the picker (registry + git
+    remotes) at all — the common path stays free of subprocess work."""
+    from unittest.mock import AsyncMock, patch
+
+    from ghplugin import projects
+
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    calls = []
+    monkeypatch.setattr(projects, "remote_repos", lambda: (calls.append(1), [])[1])
+    reg = make_registry({"default_repo": "o/set", "repos": ["o/other"]})
+    register(reg)
+    tool = {t.name: t for t in reg.tools}["github_list_issues"]
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, "[]", ""))):
+        await tool.ainvoke({})
+    assert calls == []  # picker never computed
+    reg.config["default_repo"] = ""
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, "[]", ""))):
+        await tool.ainvoke({})
+    assert calls == [1]  # …only when the default is unset

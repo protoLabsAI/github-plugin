@@ -110,6 +110,24 @@ def test_effective_default_repo():
     assert effective_default_repo("", []) == ""
 
 
+def test_effective_default_repo_only_calls_the_picker_getter_when_needed():
+    """The picker getter may fork git (checkout remotes) — a configured default_repo
+    must short-circuit it (#5 of the adversarial review)."""
+    calls = []
+
+    def picker():
+        calls.append(1)
+        return ["o/a"]
+
+    assert effective_default_repo("o/explicit", picker) == "o/explicit" and calls == []
+    assert effective_default_repo("", picker) == "o/a" and len(calls) == 1
+
+    def boom():
+        raise RuntimeError("host not ready")
+
+    assert effective_default_repo("", boom) == ""  # never raises
+
+
 # --- run_issue_command -------------------------------------------------------
 
 

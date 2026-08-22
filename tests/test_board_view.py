@@ -371,3 +371,81 @@ def test_register_wires_the_data_router_to_the_live_config(make_registry):
     assert c.get("/api/plugins/github/config").json()["repos"] == ["o/n"]
     reg.config["repos"] = ["o/n", "o/added"]  # the (shared) config dict is edited after register()
     assert c.get("/api/plugins/github/config").json()["repos"] == ["o/n", "o/added"]
+
+
+class _SeamRegistry:
+    """A host with the setup-gap seam — records every (key, message) it's handed."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str | None]] = []
+
+    def report_setup_gap(self, key, message):
+        self.calls.append((key, message))
+
+
+def test_status_route_reports_gaps_and_clears_them_on_recovery():
+    """The banner must clear on the very Re-check that sees gh installed / signed in —
+    not only at register time (#2 of the adversarial review)."""
+    seam = _SeamRegistry()
+    app = FastAPI()
+    app.include_router(build_data_router(_CFG, registry=seam), prefix="/api/plugins/github")
+    c = TestClient(app)
+
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        assert c.get("/api/plugins/github/status").json()["gh_path"] is None
+    assert dict(seam.calls)["gh"] and "not installed" in dict(seam.calls)["gh"]
+    assert dict(seam.calls)["auth"] is None
+
+    seam.calls.clear()
+    ok = '{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"kj"}]}}'
+    with (
+        patch("ghplugin.status.resolve_gh", return_value="/usr/bin/gh"),
+        patch("ghplugin.status.run_gh", new=AsyncMock(side_effect=_status_gh(auth=(0, ok, "")))),
+    ):
+        assert c.get("/api/plugins/github/status").json()["authenticated"] is True
+    assert dict(seam.calls) == {"gh": None, "auth": None}  # CLEARED, live
+
+
+def test_status_route_without_a_registry_still_works():
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        assert TestClient(_app()).get("/api/plugins/github/status").status_code == 200
+
+
+def test_register_hands_the_registry_to_the_data_router(make_registry):
+    """register() passes the registry so /status can report; a host without the seam is fine."""
+    seen = {}
+    real = __import__("ghplugin.api", fromlist=["build_data_router"]).build_data_router
+
+    def spy(cfg, registry=None):
+        seen["registry"] = registry
+        return real(cfg, registry=registry)
+
+    reg = make_registry(_CFG)
+    with patch("ghplugin.api.build_data_router", spy):
+        register(reg)
+    assert seen["registry"] is reg
+
+
+def test_routes_resolve_the_picker_off_the_event_loop():
+    """resolve_config may fork git (checkout remotes) — the routes must run it in a worker
+    thread, never on the loop (#5 of the adversarial review)."""
+    import threading
+
+    from ghplugin import api
+
+    threads = []
+    real = api.resolve_config
+
+    def spy(cfg):
+        threads.append(threading.current_thread())
+        return real(cfg)
+
+    with patch("ghplugin.api.resolve_config", spy), patch("ghplugin.status.resolve_gh", return_value=None):
+        c = TestClient(_app())
+        c.get("/api/plugins/github/config")
+        c.get("/api/plugins/github/status")
+        c.post("/api/plugins/github/issue", json={"title": ""})
+    assert len(threads) == 3
+    # TestClient runs the app loop on its own portal thread; to_thread hands off to a
+    # default-executor worker, whose name is the giveaway.
+    assert all(t.name.startswith("asyncio_") for t in threads), [t.name for t in threads]

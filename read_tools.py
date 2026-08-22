@@ -1,6 +1,6 @@
 """GitHub READ tools over `gh` — always registered (read-only is the safe default).
 
-Eleven tools, all implemented: six ported from protoAgent's tools/github_tools.py
+Twelve tools, all implemented: six ported from protoAgent's tools/github_tools.py
 (PRs, issues, diffs, CI), the repo-content readers (`github_read_file`,
 `github_read_pr_file`, `github_repo_contents`, `github_path_exists`), `github_pr_diff`,
 and `github_status` (the self-diagnosis probe — is `gh` installed / authenticated).
@@ -12,11 +12,12 @@ authenticated / repo not found / rate-limited / `gh` missing) instead of raising
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 from langchain_core.tools import tool
 
-from .gh_cli import bad_repo, check_gh_error, dicts, parse_json, run_gh
+from .gh_cli import bad_repo, check_gh_error, dicts, error_kind, parse_json, run_gh
 from .gh_issue import current_default, default_repo_error, resolve_repo
 
 # Error-relevant lines to surface from a failed CI log (github_run_failure).
@@ -27,11 +28,13 @@ _CI_ERR_RE = re.compile(
 )
 
 
-def get_read_tools(default_repo="", repos=None) -> list:
+def get_read_tools(default_repo="", repos=None, registry=None) -> list:
     """Build the read tools. ``default_repo`` (``owner/name``, or a zero-arg getter
     returning it — the live-config case) is used whenever a tool's ``repo`` arg is
     omitted, so an agent with one configured repo needn't repeat it. ``repos`` (a list
-    or a getter) is the picker list, surfaced by ``github_status`` only."""
+    or a getter) is the picker list, surfaced by ``github_status`` only — which also
+    reports its result to the host's setup-gap seam through ``registry`` (optional)
+    so the operator banner clears when the model's own check sees a recovery."""
 
     def _repos() -> list[str]:
         try:
@@ -364,15 +367,18 @@ def get_read_tools(default_repo="", repos=None) -> list:
         rc, out, serr = await run_gh(args)
         if rc == 0:
             return f"EXISTS: {repo}/{clean}" + (f" @ {ref.strip()}" if ref.strip() else "")
-        blob = (serr or out or "").lower()
-        if "404" in blob or "not found" in blob:
+        # Classify FIRST: an auth / rate-limit / missing-binary failure is UNVERIFIED
+        # (the classified error), never a MISSING verdict. Only a real 404 is MISSING —
+        # and a 404 can also mean the repo itself is inaccessible to this token.
+        kind = error_kind(rc, serr or out)
+        if kind == "not_found":
             return (
                 f"MISSING: {repo}/{clean}"
                 + (f" @ {ref.strip()}" if ref.strip() else "")
-                + " — the path does not exist."
+                + " — the path does not exist (or the repo is inaccessible to this token; HTTP 404)."
             )
         return (
-            check_gh_error(rc, serr, repo=repo)
+            check_gh_error(rc, serr or out, repo=repo)
             or f"Error (gh exit {rc}): could not verify {repo}/{clean} — treat as UNVERIFIED (a Gap, not a finding)."
         )
 
@@ -423,10 +429,11 @@ def get_read_tools(default_repo="", repos=None) -> list:
         it says exactly what's wrong and what the operator must do (install `gh`, run
         `gh auth login`, or paste a token in Settings ▸ GitHub). Takes no arguments.
         """
-        from .status import compute_status, summarize_status
+        from .status import compute_and_report, summarize_status
 
-        default = current_default(default_repo)
-        st = await compute_status(default, _repos())
+        # The getters may parse git remotes (blocking, cached) — off the event loop.
+        default, picker = await asyncio.to_thread(lambda: (current_default(default_repo), _repos()))
+        st = await compute_and_report(registry, default, picker)
         text = summarize_status(st)
         if bad := default_repo_error(default):
             text += f" NOTE: {bad}"

@@ -9,8 +9,15 @@ out. This module answers that ONE question three ways from one computation:
 - the ``github_status`` read tool → a one-paragraph summary the model can act on
   instead of guessing from a tool error;
 - ``report_gaps`` → the host's operator-warning seam (``registry.report_setup_gap``,
-  guarded — the seam is newer than this plugin's floor), called from a best-effort
-  background probe at register time so the warning shows before anything is used.
+  guarded — the seam is newer than this plugin's floor). Called from a best-effort
+  background probe at register time so the warning shows before anything is used,
+  AND from every later status computation (``/status``, the tool — see
+  ``compute_and_report``) so the banner CLEARS live when the operator installs
+  `gh` / signs in and hits Re-check. Edge-triggered: a failing key gets its message,
+  a passing key gets ``None`` (the host's pop is idempotent).
+
+Each probe starts by dropping the cached `gh` path (``reset_gh_cache``) so a `gh`
+installed after boot is found, and a `gh` removed after boot is noticed.
 
 Everything here is host-free and never raises: a probe failure is a status with
 ``error`` set, not an exception (the routes/tools/threads calling it must not die).
@@ -24,7 +31,7 @@ import logging
 import re
 import threading
 
-from .gh_cli import resolve_gh, run_gh, token_source
+from .gh_cli import auth_hint, reset_gh_cache, resolve_gh, run_gh, token_source
 
 log = logging.getLogger("protoagent.plugins.github")
 
@@ -39,7 +46,7 @@ _FAILED_RE = re.compile(r"(?:X|✗)\s+Failed to log in to (\S+)")
 GAP_GH = "gh"
 GAP_AUTH = "auth"
 
-_AUTH_HINT = "run `gh auth login` in a terminal, or paste a token in Settings ▸ GitHub (github.token)"
+_WHY_CAP = 80  # the host's setup-gap banner is ~300 chars; keep the hint, not the stack
 
 
 def _empty(default_repo: str = "", repos: list[str] | None = None) -> dict:
@@ -73,8 +80,9 @@ def _parse_auth_json(out: str) -> tuple[bool, str | None, str | None, str | None
     if str(a.get("state") or "") == "success":
         return True, str(a.get("login") or "") or None, host, None
     err = str(a.get("error") or "token rejected")
-    # gh embeds the whole HTTP body; keep the first line only.
-    return False, None, host, err.splitlines()[0][:200]
+    # gh embeds the whole HTTP body ('… 401 Unauthorized body: "{\r\n …"') — keep the
+    # status line only, so the banner/card carries the HINT rather than escaped JSON.
+    return False, None, host, err.split(" body:", 1)[0].splitlines()[0][:200]
 
 
 def _parse_auth_text(rc: int, out: str, serr: str) -> tuple[bool, str | None, str | None, str | None]:
@@ -102,6 +110,7 @@ async def compute_status(default_repo: str = "", repos: list[str] | None = None)
     default_repo, repos}``. Never raises; every failure lands in ``error``."""
     st = _empty(default_repo, repos)
     try:
+        reset_gh_cache()  # a probe must see a gh installed (or removed) since the last one
         path = resolve_gh()
         if not path:
             st["error"] = "gh CLI is not installed or not on PATH"
@@ -153,14 +162,14 @@ def summarize_status(st: dict) -> str:
         return (
             "GitHub CLI is NOT installed (no `gh` on PATH or in the usual install dirs). "
             "Install it — https://cli.github.com (macOS: `brew install gh`; Debian/Ubuntu: `sudo apt install gh`) — "
-            f"then {_AUTH_HINT}. Every github_* tool will return an error until then." + repo_bit
+            f"then {auth_hint('none')}. Every github_* tool will return an error until then." + repo_bit
         )
     ver = f" v{st['gh_version']}" if st.get("gh_version") else ""
     if not st.get("authenticated"):
-        why = f" ({st['error']})" if st.get("error") else ""
+        why = f" ({_why(st)})" if st.get("error") else ""
         return (
             f"GitHub CLI{ver} is installed at {st['gh_path']} but NOT authenticated{why}. "
-            f"To fix: {_AUTH_HINT}. Read tools on public repos may still work at low volume; "
+            f"To fix: {auth_hint(src)}. Read tools on public repos may still work at low volume; "
             "everything else will return 'not authenticated' until then." + src_bit + repo_bit
         )
     who = f" as {st['login']}" if st.get("login") else ""
@@ -172,8 +181,16 @@ def summarize_status(st: dict) -> str:
     )
 
 
+def _why(st: dict) -> str:
+    """The error fragment, first line only, capped — so a banner keeps the HINT."""
+    why = str(st.get("error") or "").splitlines()[0] if st.get("error") else ""
+    return why if len(why) <= _WHY_CAP else why[: _WHY_CAP - 1] + "…"
+
+
 def gaps_for(st: dict) -> dict[str, str | None]:
-    """The setup-gap messages this status implies, keyed by gap id; ``None`` = clear."""
+    """The setup-gap messages this status implies, keyed by gap id; ``None`` = clear.
+    Every key is ALWAYS present (a passing key is ``None``), so reporting this dict
+    clears what recovered — edge-triggered against the host's idempotent pop."""
     gaps: dict[str, str | None] = {GAP_GH: None, GAP_AUTH: None}
     if not st.get("gh_path"):
         gaps[GAP_GH] = (
@@ -182,8 +199,8 @@ def gaps_for(st: dict) -> dict[str, str | None]:
         )
         return gaps
     if not st.get("authenticated"):
-        why = f" ({st['error']})" if st.get("error") else ""
-        gaps[GAP_AUTH] = f"GitHub CLI is not authenticated{why} — {_AUTH_HINT}."
+        why = f" ({_why(st)})" if st.get("error") else ""
+        gaps[GAP_AUTH] = f"GitHub CLI is not authenticated{why} — {auth_hint(st.get('token_source'))}."
     return gaps
 
 
@@ -201,6 +218,17 @@ def report_gaps(registry, st: dict) -> bool:
     except Exception:  # noqa: BLE001 — telemetry must never break register()
         log.debug("[github] report_setup_gap failed", exc_info=True)
         return False
+
+
+async def compute_and_report(registry, default_repo: str = "", repos: list[str] | None = None) -> dict:
+    """``compute_status`` + ``report_gaps`` in one call — what ``/status`` and the
+    ``github_status`` tool use, so a recovery (gh installed, signed in) clears the
+    host banner on the very request that observed it. ``registry`` may be ``None``
+    (no host wired one): then it's just the status."""
+    st = await compute_status(default_repo, repos)
+    if registry is not None:
+        report_gaps(registry, st)
+    return st
 
 
 def probe_in_background(registry, default_repo="", repos=None) -> threading.Thread | None:

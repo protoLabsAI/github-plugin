@@ -58,17 +58,47 @@ def test_resolve_gh_falls_back_to_install_dirs_when_path_is_bare(tmp_path, monke
     assert resolve_gh() == str(fake)
 
 
-def test_resolve_gh_is_cached_until_reset(tmp_path, monkeypatch):
+def test_resolve_gh_never_caches_a_miss(tmp_path, monkeypatch):
+    """No gh at boot → the operator installs it → the NEXT call sees it (no restart).
+    Caching the miss meant Re-check said 'not installed' forever while /config's
+    availability check said true."""
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr(gh_cli, "_FALLBACK_BIN_DIRS", ())
     assert resolve_gh() is None
-    # A binary appearing later isn't seen until the cache is reset.
     fake = tmp_path / "gh"
     fake.write_text("#!/bin/sh\n")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    assert resolve_gh() is None
-    gh_cli.reset_gh_cache()
+    assert resolve_gh() == str(fake)  # seen immediately
+
+
+def test_resolve_gh_caches_a_hit_until_reset(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(gh_cli, "_FALLBACK_BIN_DIRS", ())
+    fake = tmp_path / "gh"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     assert resolve_gh() == str(fake)
+    fake.unlink()  # uninstalled mid-process
+    assert resolve_gh() == str(fake)  # the hit is cached …
+    gh_cli.reset_gh_cache()
+    assert resolve_gh() is None  # … until a probe resets it
+
+
+async def test_status_probe_resets_the_cache_so_recheck_sees_both_transitions(tmp_path, monkeypatch):
+    """Re-check after installing gh → found; Re-check after removing it → gone."""
+    from ghplugin.api import gh_available
+    from ghplugin.status import compute_status
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(gh_cli, "_FALLBACK_BIN_DIRS", ())
+    assert (await compute_status())["gh_path"] is None and gh_available() is False
+    fake = tmp_path / "gh"
+    fake.write_text("#!/bin/sh\necho 'gh version 9.9.9 (2030-01-01)'\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    st = await compute_status()
+    assert st["gh_path"] == str(fake) and st["gh_version"] == "9.9.9" and gh_available() is True
+    fake.unlink()
+    assert (await compute_status())["gh_path"] is None and gh_available() is False  # agree again
 
 
 async def test_run_gh_missing_binary_returns_not_raises(tmp_path, monkeypatch):
@@ -88,11 +118,18 @@ def test_no_token_anywhere():
     assert "GH_TOKEN" not in gh_env()
 
 
-def test_env_token_is_injected(monkeypatch):
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_env")
-    assert resolve_token() == "ghp_env"
+def test_env_token_is_passed_through_untouched_in_ghs_own_order(monkeypatch):
+    """With no config token the child env is the ambient env, verbatim — gh applies
+    its own precedence (GH_TOKEN > GITHUB_TOKEN > keyring). We never rewrite GH_TOKEN
+    from GITHUB_TOKEN (that inverted gh's order)."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_github")
+    monkeypatch.setenv("GH_TOKEN", "ghp_gh")
+    assert resolve_token() == "ghp_gh"  # GH_TOKEN first, like gh
     assert token_source() == "env"
-    assert gh_env()["GH_TOKEN"] == "ghp_env"
+    env = gh_env()
+    assert env["GH_TOKEN"] == "ghp_gh" and env["GITHUB_TOKEN"] == "ghp_github"  # untouched
+    monkeypatch.delenv("GH_TOKEN")
+    assert resolve_token() == "ghp_github" and "GH_TOKEN" not in gh_env()  # nothing injected
 
 
 def test_config_token_wins_over_env(monkeypatch):
@@ -110,6 +147,60 @@ def test_blank_config_token_falls_through_to_env(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "ghp_env")
     set_token_getter(lambda: "   ")
     assert resolve_token() == "ghp_env"
+
+
+# ── the runner never raises ──────────────────────────────────────────────────────
+
+
+async def test_run_gh_spawn_oserror_is_an_error_tuple(tmp_path, monkeypatch):
+    """ENOEXEC (a foreign-arch / truncated ~/.local/bin/gh), EMFILE … — OSError from the
+    spawn must come back as (126, '', reason), not escape through the tool layer."""
+    import errno
+
+    monkeypatch.setattr(gh_cli, "resolve_gh", lambda: "/fake/gh")
+
+    async def boom(*a, **k):
+        raise OSError(errno.ENOEXEC, "Exec format error")
+
+    monkeypatch.setattr(gh_cli.asyncio, "create_subprocess_exec", boom)
+    rc, out, serr = await run_gh(["--version"])
+    assert rc == 126 and out == "" and "could not run gh at /fake/gh" in serr and "Exec format error" in serr
+    assert check_gh_error(rc, serr).startswith("Error (gh exit 126): could not run gh at /fake/gh")
+
+
+async def test_run_gh_timeout_kill_on_an_exited_process_does_not_raise(monkeypatch):
+    """The process can exit between the timeout and the kill — ProcessLookupError from
+    kill() must be swallowed, the timeout still reported."""
+    import asyncio
+
+    monkeypatch.setattr(gh_cli, "resolve_gh", lambda: "/fake/gh")
+
+    class _Proc:
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.sleep(10)
+
+        def kill(self):
+            raise ProcessLookupError()
+
+    async def spawn(*a, **k):
+        return _Proc()
+
+    monkeypatch.setattr(gh_cli.asyncio, "create_subprocess_exec", spawn)
+    rc, out, serr = await run_gh(["--version"], timeout=0)
+    assert rc == 1 and "timed out" in serr
+
+
+async def test_run_gh_permission_error_is_126(monkeypatch):
+    monkeypatch.setattr(gh_cli, "resolve_gh", lambda: "/fake/gh")
+
+    async def boom(*a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(gh_cli.asyncio, "create_subprocess_exec", boom)
+    rc, _out, serr = await run_gh(["--version"])
+    assert rc == 126 and "not executable" in serr
 
 
 def test_raising_token_getter_means_no_token():
@@ -141,6 +232,32 @@ def test_not_authenticated(rc, stderr):
     err = check_gh_error(rc, stderr)
     assert err.startswith("Error: GitHub CLI is not authenticated — run `gh auth login`")
     assert "Settings ▸ GitHub (github.token)" in err
+
+
+def test_auth_hint_branches_on_the_token_source(monkeypatch):
+    """'run gh auth login' is WRONG advice when a token is what gh is rejecting."""
+    from ghplugin.gh_cli import auth_hint
+
+    assert auth_hint("none").startswith("run `gh auth login`")
+    assert "GH_TOKEN / GITHUB_TOKEN in the agent's environment was rejected" in auth_hint("env")
+    assert "token saved in Settings ▸ GitHub (github.token) was rejected" in auth_hint("config")
+    # the classified error follows the LIVE source
+    monkeypatch.setenv("GH_TOKEN", "ghp_bad")
+    assert "environment was rejected" in check_gh_error(4, "")
+    set_token_getter(lambda: "ghp_bad_config")
+    assert "Settings ▸ GitHub (github.token) was rejected — replace it there" in check_gh_error(4, "")
+
+
+def test_error_kind_categories():
+    from ghplugin.gh_cli import error_kind
+
+    assert error_kind(0, "whatever") is None
+    assert error_kind(127, "") == "missing_binary"
+    assert error_kind(4, "") == "auth"
+    assert error_kind(1, "HTTP 403: API rate limit exceeded") == "rate_limit"
+    assert error_kind(1, "gh: Not Found (HTTP 404)") == "not_found"
+    assert error_kind(1, "GraphQL: Could not resolve to a Repository with the name 'o/n'.") == "not_found"
+    assert error_kind(1, "HTTP 500") == "generic"
 
 
 def test_repo_not_found_graphql():

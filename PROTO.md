@@ -13,7 +13,7 @@ tools over the `gh` CLI, with **per-agent write gating**. The host loads it via 
 | Layer | What |
 |---|---|
 | Runtime | Python ≥ 3.11; `langchain-core` (`@tool`) is provided by the host |
-| Auth | `github.token` secret (Settings) > `GITHUB_TOKEN`/`GH_TOKEN` env > `gh auth login` keyring |
+| Auth | a non-empty `github.token` secret (Settings) is injected and wins; else the env passes through and gh's own order applies (`GH_TOKEN` > `GITHUB_TOKEN` > `gh auth login` keyring) |
 | Repo | `protoLabsAI/github-plugin`, ships `enabled: false` (install ≠ enable ≠ trust) |
 
 ## 2. Commands — the PR gate
@@ -40,7 +40,7 @@ gh_cli.py                # vendored async `gh` runner: binary resolution (PATH +
                          #   injection (config secret > env), check_gh_error CLASSIFICATION, bad_repo
 status.py                # the first-run probe: compute_status / summarize_status / report_gaps (setup-gap seam)
 projects.py              # repo sources: host projects: registry (ADR 0095) + checkout `origin` remote parsing
-read_tools.py            # 11 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + github_status)
+read_tools.py            # 12 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + github_status)
 write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
@@ -88,7 +88,7 @@ data routes, the `token` secret — reads through them per call. Never capture a
 value at register time: an `onboard_project` mid-session, or a token pasted in
 Settings, must be seen by the very next call.
 
-## 5. Tools (all implemented — 11 read / 8 write / 3 review)
+## 5. Tools (all implemented — 12 read / 8 write / 3 review = 23)
 
 Each tool mocks `run_gh` in its test and asserts the exact argv + readable errors.
 `tests/test_no_raise_sweep.py` additionally invokes EVERY registered tool against a
@@ -119,8 +119,10 @@ New write op? Validate `bad_repo()`, build argv, `run_gh()`, degrade to `Error: 
 add it to `get_write_tools()`'s return list **and** `WRITE_TOOLS` in `test_register.py`,
 and mirror an existing test. Anything irreversible (merge) must be `confirm`-guarded.
 
-**Errors are classified** (`gh_cli.check_gh_error`): `gh` exit 4 / "gh auth login" ⇒
-`Error: GitHub CLI is not authenticated — …`; GraphQL "Could not resolve to a Repository"
+**Errors are classified** (`gh_cli.check_gh_error`, categories from `error_kind`): `gh`
+exit 4 / "gh auth login" ⇒ `Error: GitHub CLI is not authenticated — …` with the hint
+branched on `token_source()` (a rejected env/config token says "replace/unset it", not
+"run gh auth login"); GraphQL "Could not resolve to a Repository"
 ⇒ `Error: repo 'o/n' not found or not accessible`; HTTP 404 ⇒ not found (with the repo
 named when known); 403/429 + "rate limit" ⇒ `Error: GitHub API rate limit hit — retry …`;
 binary missing ⇒ `Error: gh CLI is not installed or not on PATH (looked in …)`. Anything
@@ -130,9 +132,16 @@ else keeps the `Error (gh exit N): <stderr>` shape. Add a category here, not in 
 gh_version, authenticated, login, host, token_source, error, default_repo, repos,
 default_repo_error}` from `gh --version` + `gh auth status --json hosts` (text fallback
 for an older `gh`); never raises. The views render a setup card from it; the
-`github_status` tool returns `summarize_status()`; `probe_in_background()` reports the
-`gh` / `auth` gaps to the host's `report_setup_gap` seam at register time (guarded —
-no seam, no thread) and clears them when healthy.
+`github_status` tool returns `summarize_status()`. **Every status computation reports**
+to the host's `report_setup_gap` seam (guarded — no seam, no-op): `probe_in_background()`
+at register time (a daemon thread, off the boot path) and `compute_and_report()` from
+`/status` and the tool, edge-triggered (a failing key gets its message, a passing key
+gets `None`) so the operator banner clears on the very Re-check that sees the recovery.
+Each probe drops the cached `gh` path first — a miss is never cached — so a `gh`
+installed after boot is found by the next call.
+**Never block the loop on the picker**: `effective_default_repo` takes the picker as a
+getter and short-circuits when `default_repo` is set; the routes and `github_status`
+run the resolution via `asyncio.to_thread`; checkout remotes are cached 10 min.
 
 ## 6. Rules
 
@@ -146,7 +155,9 @@ no seam, no thread) and clears them when healthy.
   the `origin` remote of each registered checkout / `project_board.repo`), then the
   `GITHUB_DEFAULT_REPO` / `GH_REPO` env **logged at INFO when it fires**. No repo
   anywhere ⇒ an error, never a guess. A malformed `default_repo` is the NAMED
-  `default_repo_error` (#23) in `/config`, `/status`, the issue route and the views.
+  `default_repo_error` (#23) on the plugin's `GET /config` / `/status`, the issue route,
+  the `github_status` tool and the views' setup card — i.e. on READ; the host's Settings
+  save itself is not gated (the plugin has no save route).
 - **Never raise out of a tool.** A tool that raises kills the agent's whole turn. Every
   `gh` result is typed-checked before use (the contents API returns a dict for a file,
   a list for a directory); the no-raise sweep test enforces this for every tool.

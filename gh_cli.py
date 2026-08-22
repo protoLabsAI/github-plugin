@@ -9,10 +9,11 @@ augmentation; macOS GUI apps likewise), a scan of the usual install dirs
 (``/opt/homebrew/bin``, ``/usr/local/bin``, ``~/.local/bin``, ``/usr/bin``). The
 resolved path is cached per process.
 
-Auth, in precedence order: the plugin's ``github.token`` secret (Settings ▸ GitHub,
-set via ``set_token_getter`` at register time) wins over an ambient
-``GITHUB_TOKEN`` / ``GH_TOKEN`` env var, which wins over ``gh``'s own keyring
-login (``gh auth login``). No token is required for public-repo reads at low volume.
+Auth: a non-empty ``github.token`` secret (Settings ▸ GitHub, wired via
+``set_token_getter`` at register time) is injected as ``GH_TOKEN`` and wins.
+Otherwise the child env is passed through untouched and gh's own precedence applies
+(``GH_TOKEN`` > ``GITHUB_TOKEN`` > the ``gh auth login`` keyring). No token is
+required for public-repo reads at low volume.
 
 Errors: ``check_gh_error`` turns a failed run into ONE readable ``Error: ...``
 string the model (or a person) can act on — not-authenticated, repo-not-found,
@@ -24,6 +25,7 @@ Adapted from protoAgent's tools/gh_cli.py (which was adapted from the quinn flee
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -45,7 +47,23 @@ GH_EXIT_AUTH_REQUIRED = 4
 # no shell PATH (desktop builds). Scanned in this order AFTER `shutil.which`.
 _FALLBACK_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "/usr/bin")
 
-_AUTH_HINT = "run `gh auth login` in a terminal, or paste a token in Settings ▸ GitHub (github.token)"
+
+def auth_hint(source: str | None = None) -> str:
+    """What to DO about "not authenticated", branched on where the rejected token came
+    from — "run gh auth login" is wrong advice when an env/config token is what `gh`
+    is rejecting. ``source`` defaults to the live ``token_source()``."""
+    src = source if source is not None else token_source()
+    if src == "config":
+        return (
+            "the token saved in Settings ▸ GitHub (github.token) was rejected — replace it there, "
+            "or clear it to fall back to `gh auth login`"
+        )
+    if src == "env":
+        return (
+            "the GH_TOKEN / GITHUB_TOKEN in the agent's environment was rejected — fix or unset it, "
+            "or paste a working token in Settings ▸ GitHub (github.token)"
+        )
+    return "run `gh auth login` in a terminal, or paste a token in Settings ▸ GitHub (github.token)"
 
 
 def bad_repo(repo: str) -> str | None:
@@ -66,10 +84,12 @@ _gh_resolved = False
 
 def resolve_gh() -> str | None:
     """The absolute path of the `gh` binary, or None when it can't be found. PATH
-    first (`shutil.which`), then the well-known install dirs. Cached per process —
-    call ``reset_gh_cache()`` (tests) to re-resolve."""
+    first (`shutil.which`), then the well-known install dirs. A HIT is cached per
+    process; a MISS is never cached — an operator who installs `gh` after boot must
+    be seen by the very next call (Re-check, the next tool), not the next restart.
+    ``reset_gh_cache()`` drops a hit (a stale path, the status probe, tests)."""
     global _gh_path, _gh_resolved
-    if _gh_resolved:
+    if _gh_resolved and _gh_path:
         return _gh_path
     found = shutil.which("gh")
     if not found:
@@ -78,7 +98,8 @@ def resolve_gh() -> str | None:
             if cand.is_file() and os.access(cand, os.X_OK):
                 found = str(cand)
                 break
-    _gh_path, _gh_resolved = found, True
+    if found:
+        _gh_path, _gh_resolved = found, True
     return found
 
 
@@ -118,26 +139,29 @@ def _config_token() -> str:
 
 
 def resolve_token() -> str | None:
-    """The token `gh` should use: the plugin's configured secret first (Settings ▸
-    GitHub), else the ambient GITHUB_TOKEN / GH_TOKEN env, else None (keyring)."""
-    return _config_token() or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
+    """The token `gh` will use: the plugin's configured secret first (Settings ▸
+    GitHub), else the ambient env in gh's OWN order (GH_TOKEN, then GITHUB_TOKEN),
+    else None (gh's keyring login). Informational — see ``gh_env`` for what's injected."""
+    return _config_token() or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
 
 
 def token_source() -> str:
     """Where the effective token comes from: ``config`` | ``env`` | ``none``."""
     if _config_token():
         return "config"
-    if os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"):
+    if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
         return "env"
     return "none"
 
 
 def gh_env() -> dict:
-    """The child env for a `gh` run — the ambient env plus the effective token injected
-    as GH_TOKEN (gh's own precedence: GH_TOKEN > GITHUB_TOKEN > keyring), so a config
-    token beats anything already in the environment."""
+    """The child env for a `gh` run. ONLY a non-empty config token is injected (as
+    GH_TOKEN, the var gh reads first, and GITHUB_TOKEN so nothing stale shadows it) —
+    it's what the person just pasted and it's visible in the UI. Otherwise the ambient
+    env is passed through UNTOUCHED, so gh's own precedence (GH_TOKEN > GITHUB_TOKEN >
+    keyring) applies exactly as it would in a terminal."""
     env = os.environ.copy()
-    token = resolve_token()
+    token = _config_token()
     if token:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token
@@ -174,13 +198,18 @@ async def run_gh(args: list[str], timeout: int = _COMMAND_TIMEOUT) -> tuple[int,
         )
     except asyncio.TimeoutError:
         if proc is not None:
-            proc.kill()
+            with contextlib.suppress(ProcessLookupError):  # it exited between the timeout and the kill
+                proc.kill()
         return 1, "", f"gh command timed out after {timeout}s"
     except FileNotFoundError:
         reset_gh_cache()  # the cached path went stale (uninstalled mid-process)
         return 127, "", _MISSING_BINARY
     except PermissionError:
         return 126, "", f"gh binary at {binary} is not executable."
+    except OSError as e:
+        # ENOEXEC (a foreign-arch / truncated ~/.local/bin/gh), EMFILE, E2BIG … — a
+        # spawn failure is a tool ERROR, never an exception through the tool layer.
+        return 126, "", f"could not run gh at {binary}: {e}"
 
 
 # ── output parsing ────────────────────────────────────────────────────────────────
@@ -215,25 +244,18 @@ _RATE_LIMIT_RESET_RE = re.compile(r"(?:retry after|reset(?:s)? (?:at|in)|try aga
 _NOT_FOUND_REPO_RE = re.compile(r"Could not resolve to a Repository with the name '([^']+)'", re.I)
 
 
-def classify_gh_error(returncode: int, stderr: str, *, repo: str = "") -> str | None:
-    """Map a failed `gh` run to ONE actionable ``Error: ...`` string, or None if it
-    succeeded. The categories, in the order they're checked:
-
-    - binary missing (the runner's stand-in stderr, or exit 127);
-    - not authenticated (gh's exit 4, or stderr pointing at `gh auth login`);
-    - rate-limited (HTTP 403 + "rate limit");
-    - repo not found / not accessible (GraphQL "Could not resolve to a Repository",
-      or an HTTP 404);
-    - anything else → the generic ``Error (gh exit N): <stderr>`` (unchanged shape,
-      existing tests and callers match on it).
-    """
+def error_kind(returncode: int, stderr: str) -> str | None:
+    """The CATEGORY of a failed `gh` run — ``None`` on success, else one of
+    ``missing_binary`` | ``auth`` | ``rate_limit`` | ``not_found`` | ``generic`` —
+    checked in that order. ``classify_gh_error`` renders it; a caller that must
+    branch on the category (``github_path_exists``: a 404 is MISSING, anything else
+    is an error) uses this directly so the two can't disagree."""
     if returncode == 0:
         return None
     blob = stderr or ""
     low = blob.lower()
-
     if _MISSING_BINARY in blob or returncode == 127:
-        return f"Error: gh CLI is not installed or not on PATH (looked in {', '.join(gh_search_dirs())})."
+        return "missing_binary"
     if (
         returncode == GH_EXIT_AUTH_REQUIRED
         or "gh auth login" in low
@@ -241,15 +263,43 @@ def classify_gh_error(returncode: int, stderr: str, *, repo: str = "") -> str | 
         or "authentication required" in low
         or "bad credentials" in low
     ):
-        return f"Error: GitHub CLI is not authenticated — {_AUTH_HINT}."
+        return "auth"
     if "rate limit" in low and ("403" in low or "429" in low or "exceeded" in low):
+        return "rate_limit"
+    if _NOT_FOUND_REPO_RE.search(blob) or "http 404" in low:
+        return "not_found"
+    return "generic"
+
+
+def classify_gh_error(returncode: int, stderr: str, *, repo: str = "") -> str | None:
+    """Map a failed `gh` run to ONE actionable ``Error: ...`` string, or None if it
+    succeeded. The categories (``error_kind``), in the order they're checked:
+
+    - binary missing (the runner's stand-in stderr, or exit 127);
+    - not authenticated (gh's exit 4, or stderr pointing at `gh auth login`) — the
+      hint is branched on ``token_source()``: a rejected env/config token says so,
+      instead of the wrong "run gh auth login";
+    - rate-limited (HTTP 403/429 + "rate limit");
+    - repo not found / not accessible (GraphQL "Could not resolve to a Repository",
+      or an HTTP 404);
+    - anything else → the generic ``Error (gh exit N): <stderr>`` (unchanged shape,
+      existing tests and callers match on it).
+    """
+    kind = error_kind(returncode, stderr)
+    if kind is None:
+        return None
+    blob = stderr or ""
+    if kind == "missing_binary":
+        return f"Error: gh CLI is not installed or not on PATH (looked in {', '.join(gh_search_dirs())})."
+    if kind == "auth":
+        return f"Error: GitHub CLI is not authenticated — {auth_hint()}."
+    if kind == "rate_limit":
         m = _RATE_LIMIT_RESET_RE.search(blob)
         when = f" — retry after {m.group(1).strip()}" if m else " — retry in a few minutes"
         return f"Error: GitHub API rate limit hit{when}."
-    m = _NOT_FOUND_REPO_RE.search(blob)
-    if m:
-        return f"Error: repo '{m.group(1)}' not found or not accessible (check the owner/name and your token's scopes)."
-    if "http 404" in low:
+    if kind == "not_found":
+        if m := _NOT_FOUND_REPO_RE.search(blob):
+            return f"Error: repo '{m.group(1)}' not found or not accessible (check the owner/name and your token's scopes)."
         where = (
             f"repo '{repo}' not found or not accessible, or the path/ref/number doesn't exist in it"
             if repo

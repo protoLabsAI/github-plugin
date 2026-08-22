@@ -103,7 +103,7 @@ async def test_active_account_failing_is_not_authenticated_even_with_a_good_inac
     ):
         st = await compute_status()
     assert st["authenticated"] is False and st["login"] is None
-    assert st["error"].startswith("non-200 OK status code: 401") and "\n" not in st["error"]
+    assert st["error"] == "non-200 OK status code: 401 Unauthorized"  # the body is dropped
 
 
 async def test_not_logged_in_json_is_empty_hosts():
@@ -199,9 +199,41 @@ def test_summary_unauthenticated_tells_how_to_fix():
         }
     )
     assert "NOT authenticated (not logged in)" in text
-    assert "gh auth login" in text and "Settings ▸ GitHub (github.token)" in text
+    # an ENV token is what was rejected → say that, not "run gh auth login"
+    assert "GH_TOKEN / GITHUB_TOKEN in the agent's environment was rejected" in text
     assert "Default repo: o/n." in text and "2 repo(s) in the picker: o/n, o/m" in text
     assert "GITHUB_TOKEN/GH_TOKEN env" in text
+
+
+def test_summary_unauthenticated_without_a_token_says_gh_auth_login():
+    text = summarize_status(
+        {
+            "gh_path": "/usr/bin/gh",
+            "gh_version": "2.9",
+            "authenticated": False,
+            "error": "not logged in",
+            "default_repo": "",
+            "repos": [],
+            "token_source": "none",
+        }
+    )
+    assert "To fix: run `gh auth login` in a terminal, or paste a token in Settings ▸ GitHub (github.token)." in text
+
+
+def test_summary_and_gaps_cap_the_error_fragment_so_the_hint_survives():
+    long_err = "non-200 OK status code: 401 Unauthorized body: " + "x" * 300
+    st = {
+        "gh_path": "/usr/bin/gh",
+        "authenticated": False,
+        "error": long_err,
+        "token_source": "config",
+        "default_repo": "",
+        "repos": [],
+    }
+    gap = gaps_for(st)[GAP_AUTH]
+    assert "…" in gap and len(gap) < 300  # the host banner is ~300 chars; the hint must fit
+    assert "Settings ▸ GitHub (github.token) was rejected" in gap
+    assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in summarize_status(st)
 
 
 def test_summary_healthy_is_one_paragraph():
@@ -224,9 +256,38 @@ def test_summary_healthy_is_one_paragraph():
 def test_gaps_for_each_state():
     assert gaps_for({"gh_path": None}) == {GAP_GH: gaps_for({"gh_path": None})[GAP_GH], GAP_AUTH: None}
     assert "not installed" in gaps_for({"gh_path": None})[GAP_GH]
-    g = gaps_for({"gh_path": "/x/gh", "authenticated": False, "error": "not logged in"})
-    assert g[GAP_GH] is None and "not authenticated (not logged in)" in g[GAP_AUTH]
+    g = gaps_for({"gh_path": "/x/gh", "authenticated": False, "error": "not logged in", "token_source": "none"})
+    assert g[GAP_GH] is None and "not authenticated (not logged in) — run `gh auth login`" in g[GAP_AUTH]
+    g = gaps_for({"gh_path": "/x/gh", "authenticated": False, "error": "401", "token_source": "env"})
+    assert "environment was rejected" in g[GAP_AUTH]
     assert gaps_for({"gh_path": "/x/gh", "authenticated": True}) == {GAP_GH: None, GAP_AUTH: None}
+
+
+async def test_compute_and_report_clears_the_banner_on_recovery():
+    """Edge-triggered: the failing key gets its message; on the next probe that passes,
+    the SAME key gets None — the host's pop is idempotent, so the banner clears live."""
+    from ghplugin.status import compute_and_report
+
+    seam = _Seam()
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        st = await compute_and_report(seam, "o/n", ["o/n"])
+    assert st["gh_path"] is None and dict(seam.calls)[GAP_GH] and dict(seam.calls)[GAP_AUTH] is None
+    seam.calls.clear()
+    with (
+        patch("ghplugin.status.resolve_gh", return_value="/usr/bin/gh"),
+        patch("ghplugin.status.run_gh", new=AsyncMock(side_effect=_gh())),
+    ):
+        st = await compute_and_report(seam, "o/n", ["o/n"])
+    assert st["authenticated"] is True
+    assert dict(seam.calls) == {GAP_GH: None, GAP_AUTH: None}  # both CLEARED on the recovering probe
+
+
+async def test_compute_and_report_without_a_registry_is_just_status():
+    from ghplugin.status import compute_and_report
+
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        st = await compute_and_report(None, "", [])
+    assert st["gh_path"] is None
 
 
 class _Seam:

@@ -10,7 +10,7 @@ read-only in-tree `github` plugin.
 
 ## Tools (all implemented)
 
-**Read** (always, 11): `github_get_pr`, `github_get_issue`, `github_list_issues`,
+**Read** (always, 12): `github_get_pr`, `github_get_issue`, `github_list_issues`,
 `github_get_commit_diff`, `github_pr_diff`, `github_ci_runs`, `github_run_failure`,
 `github_read_file`, `github_read_pr_file`, `github_repo_contents`, `github_path_exists`,
 and `github_status` (is `gh` installed / signed in, as whom, which default repo — the
@@ -49,9 +49,11 @@ github:
   repos: []             # repo picker list; the host's projects: registry is added automatically
 ```
 
-**Auth**, in precedence order: the `github.token` secret (Settings ▸ GitHub — a personal
-access token with `repo` scope) > `GITHUB_TOKEN` / `GH_TOKEN` in the environment >
-`gh`'s own keyring login (`gh auth login`). Public-repo reads need none at low volume.
+**Auth**: a non-empty `github.token` secret (Settings ▸ GitHub — a personal access token
+with `repo` scope) is injected into every `gh` run and wins. Otherwise the environment is
+passed through untouched and `gh`'s own precedence applies: `GH_TOKEN` > `GITHUB_TOKEN` >
+the `gh auth login` keyring. Public-repo reads need none at low volume. When auth fails,
+the error says which of those was rejected and what to do about it.
 `gh` is found on PATH or in the usual install dirs (`/opt/homebrew/bin`, `/usr/local/bin`,
 `~/.local/bin`, `/usr/bin`) — a desktop build launched without a shell PATH still works.
 
@@ -60,7 +62,8 @@ entry. The picker is `github.repos` ∪ the host's managed-projects registry (AD
 `projects:` entries with a `github:` binding) ∪ — last resort — the `owner/name` parsed
 from the `origin` remote of each registered checkout (and `project_board.repo`). All of
 it is read live: a Settings edit or an `onboard_project` mid-session is seen by the
-next call. A malformed `default_repo` is a named error, never fed to `gh`.
+next call. A malformed `default_repo` is a named error on the plugin's `GET /config` and
+in the views' setup card (not on Settings save), never fed to `gh`.
 
 ## Develop
 

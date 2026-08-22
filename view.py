@@ -57,8 +57,13 @@ _SETUP_JS = r"""
     } else if(!st.authenticated){
       lines.push('<div class="st"><span class="warn">!</span> GitHub CLI is not signed in</div>'
         + '<div class="sd">Found <code>gh</code>' + (st.gh_version ? ' v' + esc(st.gh_version) : '') + ' at <code>' + esc(st.gh_path) + '</code>'
-        + (st.error ? ' — ' + esc(st.error) : '') + '.<br>Run <code>gh auth login</code> in a terminal, or paste a personal access token'
-        + ' in <b>Settings ▸ GitHub</b> (github.token)' + (st.token_source === 'config' ? ' — the saved token was rejected; replace it' : '') + '.</div>');
+        + (st.error ? ' — ' + esc(st.error) : '') + '.<br>'
+        + (st.token_source === 'config'
+            ? 'The token saved in <b>Settings ▸ GitHub</b> (github.token) was rejected — replace it there, or clear it to fall back to <code>gh auth login</code>.'
+            : st.token_source === 'env'
+              ? 'The <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code> in the agent\'s environment was rejected — fix or unset it, or paste a working token in <b>Settings ▸ GitHub</b> (github.token).'
+              : 'Run <code>gh auth login</code> in a terminal, or paste a personal access token in <b>Settings ▸ GitHub</b> (github.token).')
+        + '</div>');
     }
     if(st && st.default_repo_error){
       lines.push('<div class="st"><span class="warn">!</span> Default repo is malformed</div>'

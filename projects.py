@@ -27,8 +27,10 @@ they are. ``remote_repos`` parses ``git -C <path> remote get-url origin`` for ea
 (``github.com[:/]owner/name(.git)?``, HTTPS or SSH) so a fresh install that
 onboarded a project, or pointed the board at a checkout, gets a working default
 repo with nothing typed twice. These come LAST (after explicit + registry
-``github:`` entries), are cached briefly per path, and a non-git or remote-less
-path contributes nothing.
+``github:`` entries), are cached per path (10 min — the register-time probe thread
+primes the cache, the async routes call this via ``asyncio.to_thread``, and a
+configured ``default_repo`` short-circuits it entirely), and a non-git or
+remote-less path contributes nothing.
 
 **Every read degrades to ``[]``.** The plugin's ``min_protoagent_version`` stays
 0.27.0 — the projection is additive, and bumping the floor would cut off older
@@ -51,7 +53,7 @@ from pathlib import Path
 GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$", re.I)
 
 _GIT_TIMEOUT = 3  # seconds — `git remote get-url` is local and instant; never let it hang a tool call
-_REMOTE_TTL = 60.0  # seconds — per-path cache so a per-call getter doesn't fork git per tool call
+_REMOTE_TTL = 600.0  # seconds — a checkout's origin rarely changes; the per-call getters must not fork git
 _remote_cache: dict[str, tuple[float, str | None]] = {}
 
 
