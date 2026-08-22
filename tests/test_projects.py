@@ -128,3 +128,138 @@ def test_default_repo_falls_through_to_the_registry(fake_host):
     assert effective_default_repo("", effective_repos([])) == "o/a"
     # explicit default still beats everything
     assert effective_default_repo("o/explicit", effective_repos([])) == "o/explicit"
+
+
+# ── v0.6.0: a local checkout's `origin` remote becomes owner/name ──
+
+
+@pytest.fixture(autouse=True)
+def _fresh_remote_cache():
+    from ghplugin.projects import reset_remote_cache
+
+    reset_remote_cache()
+    yield
+    reset_remote_cache()
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://github.com/protoLabsAI/github-plugin.git", "protoLabsAI/github-plugin"),
+        ("https://github.com/protoLabsAI/github-plugin", "protoLabsAI/github-plugin"),
+        ("git@github.com:protoLabsAI/github-plugin.git", "protoLabsAI/github-plugin"),
+        ("ssh://git@github.com/protoLabsAI/github-plugin.git", "protoLabsAI/github-plugin"),
+        ("https://github.com/o/n/", "o/n"),
+        ("https://gitlab.com/o/n.git", None),  # not GitHub — never masquerades
+        ("", None),
+        ("not a url", None),
+    ],
+)
+def test_repo_from_remote_url(url, expected):
+    from ghplugin.projects import repo_from_remote_url
+
+    assert repo_from_remote_url(url) == expected
+
+
+def _git_repo(tmp_path, name, origin=None):
+    """A real (empty) git checkout, optionally with an origin remote."""
+    import subprocess
+
+    d = tmp_path / name
+    d.mkdir()
+    subprocess.run(["git", "init", "-q", str(d)], check=True)
+    if origin:
+        subprocess.run(["git", "-C", str(d), "remote", "add", "origin", origin], check=True)
+    return d
+
+
+def test_repo_from_checkout_parses_the_origin_remote(tmp_path):
+    from ghplugin.projects import repo_from_checkout
+
+    d = _git_repo(tmp_path, "proj", "git@github.com:o/proj.git")
+    assert repo_from_checkout(str(d)) == "o/proj"
+
+
+def test_repo_from_checkout_degrades_for_non_repos_and_remoteless_repos(tmp_path):
+    from ghplugin.projects import repo_from_checkout
+
+    assert repo_from_checkout(str(tmp_path / "missing")) is None  # no such dir
+    (tmp_path / "plain").mkdir()
+    assert repo_from_checkout(str(tmp_path / "plain")) is None  # not a git repo
+    assert repo_from_checkout(str(_git_repo(tmp_path, "noremote"))) is None  # no origin
+    assert repo_from_checkout("") is None
+
+
+def test_repo_from_checkout_is_cached_per_path(tmp_path, monkeypatch):
+    import subprocess
+
+    from ghplugin import projects
+
+    d = _git_repo(tmp_path, "proj", "https://github.com/o/proj")
+    assert projects.repo_from_checkout(str(d)) == "o/proj"
+    calls = []
+    real = subprocess.run
+    monkeypatch.setattr(projects.subprocess, "run", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
+    assert projects.repo_from_checkout(str(d)) == "o/proj"
+    assert calls == []  # served from the cache — a per-call getter never forks git per tool call
+
+
+def test_remote_repos_come_from_registry_paths_and_the_board_repo(tmp_path, monkeypatch):
+    """A registry project with only a `path` (no github:), and project_board.repo, are
+    checkouts — their origin names the repo. Bound entries' paths are scanned too (the
+    remote may differ from the declared binding), after the unbound ones."""
+    import sys
+    import types
+
+    from ghplugin.projects import checkout_paths, effective_repos, remote_repos
+
+    unbound = _git_repo(tmp_path, "unbound", "git@github.com:o/unbound.git")
+    bound = _git_repo(tmp_path, "bound", "git@github.com:o/bound-remote.git")
+    board = _git_repo(tmp_path, "board", "https://github.com/o/board.git")
+
+    sdk = types.ModuleType("graph.sdk")
+    sdk.config = lambda: types.SimpleNamespace(
+        projects=[
+            {"name": "u", "path": str(unbound)},
+            {"name": "b", "path": str(bound), "github": "o/bound"},
+        ],
+        filesystem_projects=None,
+        plugin_config={"project_board": {"repo": str(board)}},
+    )
+    graph = types.ModuleType("graph")
+    graph.sdk = sdk
+    monkeypatch.setitem(sys.modules, "graph", graph)
+    monkeypatch.setitem(sys.modules, "graph.sdk", sdk)
+
+    assert checkout_paths() == [str(unbound), str(bound), str(board)]
+    assert remote_repos() == ["o/unbound", "o/bound-remote", "o/board"]
+    # Order of the picker: explicit, then registry bindings, then remotes (last resort), deduped.
+    assert effective_repos(["o/explicit"]) == ["o/explicit", "o/bound", "o/unbound", "o/bound-remote", "o/board"]
+    assert effective_repos([], include_remotes=False) == ["o/bound"]
+
+
+def test_board_repo_dot_sentinel_is_ignored(monkeypatch):
+    """projectBoard's `repo: "."` is its UNCONFIGURED default (it refuses to build there) —
+    never parse the server's cwd as the agent's repo."""
+    import sys
+    import types
+
+    from ghplugin.projects import board_repo_path, checkout_paths
+
+    for sentinel in (".", "", None):
+        sdk = types.ModuleType("graph.sdk")
+        sdk.config = lambda s=sentinel: types.SimpleNamespace(
+            projects=[], filesystem_projects=None, plugin_config={"project_board": {"repo": s}}
+        )
+        graph = types.ModuleType("graph")
+        graph.sdk = sdk
+        monkeypatch.setitem(sys.modules, "graph", graph)
+        monkeypatch.setitem(sys.modules, "graph.sdk", sdk)
+        assert board_repo_path() == ""
+        assert checkout_paths() == []
+
+
+def test_no_host_means_no_remotes():
+    from ghplugin.projects import board_repo_path, checkout_paths, remote_repos
+
+    assert checkout_paths() == [] and remote_repos() == [] and board_repo_path() == ""

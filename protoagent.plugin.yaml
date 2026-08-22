@@ -2,7 +2,7 @@
 # Keep `version` in lockstep with pyproject.toml (tests/test_version.py asserts it).
 id: github
 name: GitHub (read/write tools)
-version: 0.5.0
+version: 0.6.0
 description: >-
   Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
   read tools (PRs, issues, diffs, CI, repo files/contents) are always on; the write
@@ -10,19 +10,31 @@ description: >-
   when `github.write: true` — so a research/Lead agent stays read-only while a
   coding/PM agent gets write, purely by its own per-instance config (ADR 0019).
   Merging is `confirm`-guarded. Supersedes the read-only in-tree `github` plugin.
-  Tools degrade to a readable error if `gh` isn't installed/authenticated.
+  Tools degrade to a readable, classified error (not authenticated / repo not found /
+  rate-limited / `gh` missing) — and `github_status` + a setup card in the views say
+  exactly what to fix on a fresh machine.
 enabled: false                 # SHIP DISABLED — enabling is the operator's trust decision
 repository: https://github.com/protoLabsAI/github-plugin
 min_protoagent_version: "0.27.0"
 
 # Config (ADR 0019): defaults are the source of truth; langgraph-config.yaml overlays.
 # `write` is the per-agent gate — each agent's config decides read-only vs read+write.
-# `default_repo`/`repos` route the user-only `/issue` command (and the console views):
-# explicit `--repo` > default_repo > first of repos > GITHUB_DEFAULT_REPO/GH_REPO env.
+# `default_repo`/`repos` route the tools' omitted-repo fallback, the user-only `/issue`
+# command and the console views: explicit repo > default_repo > first of repos (the
+# list below ∪ the project registry ∪ checkout origin remotes) > GITHUB_DEFAULT_REPO /
+# GH_REPO env (logged when it fires). All read LIVE — a Settings edit or an onboarded
+# project is seen by the next call, no restart.
 config_section: github
 config:
   write: false                 # false = read tools only; true = read + write tools
-  default_repo: ""             # preselected repo for /issue (owner/name); "" = none
+  default_repo: ""             # default repo (owner/name) for tools + /issue; "" = none.
+                               # Must be owner/name — anything else is a named error in
+                               # the views / tools (#23), never fed to `gh`.
+  token: ""                    # OPTIONAL personal access token (secret → secrets.yaml).
+                               # When set, injected into every `gh` run as GH_TOKEN and
+                               # wins; when blank the env passes through untouched and
+                               # gh's own order applies (GH_TOKEN > GITHUB_TOKEN > the
+                               # `gh auth login` keyring).
   repos: []                    # repo picker list (each owner/name) for /issue + views.
                                # The host's managed-projects registry (ADR 0095,
                                # protoAgent 0.115.0+) is ALWAYS added: every `projects:`
@@ -33,11 +45,20 @@ config:
                                # here come first, in this order, so the default-repo
                                # resolution is unchanged; the registry's follow.
                                # Older hosts with no registry: behavior is unchanged.
+                               # LAST RESORT (v0.6.0): a registry project with only a
+                               # `path` (no `github:`), and `project_board.repo`, are
+                               # git checkouts — their `origin` remote is parsed into
+                               # owner/name, so a fresh install that onboarded a project
+                               # gets a working default with nothing typed twice.
+
+# Secrets (ADR 0019) — routed to the gitignored secrets.yaml, redacted in the UI.
+secrets: [token]
 
 # Settings (ADR 0019) — surfaced as editable fields in the console.
 settings:
   - {key: write, label: "Allow write tools (this agent)", type: bool}
-  - {key: default_repo, label: "Default repo (owner/name)", type: string}
+  - {key: default_repo, label: "Default repo (owner/name)", type: string, description: "owner/name — used when a tool or /issue omits the repo. Leave blank to fall back to the first picker entry."}
+  - {key: token, label: "GitHub token (PAT) — optional; gh auth login also works", type: secret, description: "A personal access token with repo scope. When set it is used for every gh call (over any GH_TOKEN/GITHUB_TOKEN in the environment); leave blank to let gh use the environment or its own `gh auth login` keyring login."}
   - {key: repos, label: "Repo picker list", type: string_list}
 
 # Console views (ADR 0026/0057) — sandboxed iframes the plugin serves itself (api.py).
@@ -59,8 +80,10 @@ public_paths:
   - /plugins/github/view
   - /plugins/github/new-issue
 
-# Auth: `gh` uses its own ambient auth (`gh auth login`), or GITHUB_TOKEN / GH_TOKEN
-# from the env if set. No plugin secret needed for public-repo reads.
+# Auth: a non-empty `token` secret (Settings ▸ GitHub) is injected and wins; otherwise
+# the env passes through and gh's own precedence applies (GH_TOKEN > GITHUB_TOKEN >
+# the `gh auth login` keyring). Nothing is needed for public-repo reads at low volume. `GET /api/plugins/github/status` + the
+# `github_status` tool report which applies; the views show a setup card when none does.
 
 # Declarative transparency (shown in the console; not yet enforced).
 capabilities:

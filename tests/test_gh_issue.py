@@ -9,6 +9,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 from ghplugin.gh_issue import (
+    current_default,
+    default_repo_error,
     effective_default_repo,
     labels_for,
     missing_sections,
@@ -50,10 +52,80 @@ def test_resolve_repo_precedence(monkeypatch):
     assert resolve_repo(None, "") == "o/env"  # then env
 
 
+def test_resolve_repo_env_fallback_is_logged_not_silent(monkeypatch, caplog):
+    """The env step is invisible in Settings — when it decides the repo, say so at INFO."""
+    import logging
+
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.setenv("GH_REPO", "o/env")
+    with caplog.at_level(logging.INFO, logger="protoagent.plugins.github"):
+        assert resolve_repo(None, "") == "o/env"
+    assert any("GH_REPO=o/env" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="protoagent.plugins.github"):
+        assert resolve_repo("o/explicit", "") == "o/explicit"  # env never consulted
+    assert not caplog.records
+
+
+def test_resolve_repo_accepts_a_getter_and_calls_it_lazily(monkeypatch):
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    calls = []
+
+    def getter():
+        calls.append(1)
+        return "o/live"
+
+    assert resolve_repo("o/explicit", getter) == "o/explicit" and calls == []  # explicit ⇒ getter untouched
+    assert resolve_repo("", getter) == "o/live" and len(calls) == 1
+
+    def boom():
+        raise RuntimeError("host not ready")
+
+    assert resolve_repo("", boom) is None  # a broken getter reads as "no default", never raises
+    assert current_default(boom) == "" and current_default(" o/s ") == "o/s"
+
+
+def test_default_repo_error_names_only_malformed_values():
+    assert default_repo_error("") is None and default_repo_error("  ") is None
+    assert default_repo_error("o/n") is None
+    err = default_repo_error("protoLabsAI")
+    assert err.startswith("Error: github.default_repo must be 'owner/name' (got 'protoLabsAI')")
+    assert "Settings ▸ GitHub" in err
+
+
+async def test_issue_command_names_a_malformed_configured_default(monkeypatch):
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    out = await run_issue_command("A title with no repo flag", default_repo="just-owner")
+    assert out.startswith("Error: github.default_repo must be 'owner/name' (got 'just-owner')")
+    # an explicit --repo that's malformed is still the --repo error
+    out = await run_issue_command("Title --repo nope", default_repo="o/fine")
+    assert out.startswith("Error: --repo must be 'owner/name'")
+
+
 def test_effective_default_repo():
     assert effective_default_repo("o/explicit", ["o/a"]) == "o/explicit"
     assert effective_default_repo("", ["o/a", "o/b"]) == "o/a"  # first of the picker list
     assert effective_default_repo("", []) == ""
+
+
+def test_effective_default_repo_only_calls_the_picker_getter_when_needed():
+    """The picker getter may fork git (checkout remotes) — a configured default_repo
+    must short-circuit it (#5 of the adversarial review)."""
+    calls = []
+
+    def picker():
+        calls.append(1)
+        return ["o/a"]
+
+    assert effective_default_repo("o/explicit", picker) == "o/explicit" and calls == []
+    assert effective_default_repo("", picker) == "o/a" and len(calls) == 1
+
+    def boom():
+        raise RuntimeError("host not ready")
+
+    assert effective_default_repo("", boom) == ""  # never raises
 
 
 # --- run_issue_command -------------------------------------------------------

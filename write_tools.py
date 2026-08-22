@@ -42,9 +42,10 @@ def _pr_number(url: str) -> str:
     return tail if tail.isdigit() else ""
 
 
-def get_write_tools(default_repo: str = "", emit=None) -> list:
-    """Build the write tools. ``default_repo`` (``owner/name``) is used whenever a tool's
-    ``repo`` arg is omitted, so an agent with one configured repo needn't repeat it.
+def get_write_tools(default_repo="", emit=None) -> list:
+    """Build the write tools. ``default_repo`` (``owner/name``, or a zero-arg getter
+    returning it — the live-config case) is used whenever a tool's ``repo`` arg is
+    omitted, so an agent with one configured repo needn't repeat it.
 
     ``emit`` is the host's namespaced event-bus seam (ADR 0039; ``registry.emit``). When
     given, PR lifecycle events are broadcast as ``github.pr.opened`` / ``github.pr.merged``
@@ -80,7 +81,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
             if label:
                 args += ["--label", label]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         return out.strip()
 
@@ -100,7 +101,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
             return err
         args = ["issue", "comment", str(number), "--repo", repo, "--body", body]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         return out.strip()
 
@@ -135,7 +136,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
             body,
         ]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         url = out.strip()
         _emit(
@@ -173,13 +174,13 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
             if body:
                 args += ["--body", body]
             rc, out, serr = await run_gh(args)
-            if gh_err := check_gh_error(rc, serr):
+            if gh_err := check_gh_error(rc, serr, repo=repo):
                 return gh_err
             url = out.strip()
         if state:
             args = ["pr", "ready", str(number), "--repo", repo] + (["--undo"] if state == "draft" else [])
             rc, out, serr = await run_gh(args)
-            if gh_err := check_gh_error(rc, serr):
+            if gh_err := check_gh_error(rc, serr, repo=repo):
                 return gh_err
             url = url or out.strip()
         return url or f"Edited PR #{number} in {repo}."
@@ -225,7 +226,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
         if delete_branch:
             args.append("--delete-branch")
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         _emit("pr.merged", {"repo": repo, "number": str(number), "method": method})
         return out.strip() or f"Merged PR #{number} in {repo} via {method}."
@@ -255,7 +256,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
         if comment and not reopen:
             args += ["--comment", comment]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         return out.strip() or f"{'Reopened' if reopen else 'Closed'} {kind} #{number} in {repo}."
 
@@ -288,7 +289,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
         for label in removes:
             args += ["--remove-label", label]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         return out.strip() or f"Updated labels on {kind} #{number} in {repo}."
 
@@ -321,7 +322,7 @@ def get_write_tools(default_repo: str = "", emit=None) -> list:
         for user in removes:
             args += ["--remove-assignee", user]
         rc, out, serr = await run_gh(args)
-        if gh_err := check_gh_error(rc, serr):
+        if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
         return out.strip() or f"Updated assignees on {kind} #{number} in {repo}."
 

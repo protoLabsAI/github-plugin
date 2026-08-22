@@ -372,3 +372,124 @@ async def test_read_pr_file_errors_when_the_head_sha_is_unresolvable():
     with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=fake_gh)):
         out = await _read_pr_file_tool().ainvoke({"repo": "o/r", "number": 1, "path": "x.ts"})
     assert "could not resolve the head SHA" in out
+
+
+# ── v0.6.0: the descriptions the model sees are TRUE ─────────────────────────────
+
+
+def test_no_tool_description_carries_a_todo_or_stub_note():
+    """`github_read_file`'s docstring (= the tool description the model reads) shipped a
+    `TODO(team): implement via …` for five releases while the tool worked fine."""
+    for t in get_read_tools():
+        desc = (t.description or "").lower()
+        assert "todo" not in desc and "stub" not in desc, f"{t.name}: {t.description!r}"
+
+
+@pytest.mark.asyncio
+async def test_repo_contents_on_a_file_path_returns_an_error_string():
+    """The contents API returns a dict for a FILE — iterating it raised through the tool layer."""
+    body = json.dumps({"type": "file", "name": "README.md", "path": "README.md", "size": 42})
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, body, ""))):
+        result = await _repo_contents_tool().ainvoke({"repo": "owner/name", "path": "README.md"})
+    assert result == "Error: 'README.md' is a file, not a directory — use github_read_file to read it."
+
+
+@pytest.mark.asyncio
+async def test_repo_contents_skips_non_dict_rows():
+    body = json.dumps([{"name": "a", "path": "a", "type": "file", "size": 1}, None, "x"])
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, body, ""))):
+        result = await _repo_contents_tool().ainvoke({"repo": "owner/name", "path": ""})
+    assert "1 item(s)" in result and "  a  (a)" in result
+
+
+@pytest.mark.asyncio
+async def test_get_pr_wrong_json_type_is_an_error_string():
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, "[1, 2]", ""))):
+        result = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
+    assert result.startswith("Error: unexpected gh output (expected a JSON dict, got list)")
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_gh_is_a_classified_error(monkeypatch):
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    with patch(
+        "ghplugin.read_tools.run_gh",
+        new=AsyncMock(return_value=(4, "", "To get started with GitHub CLI, please run:  gh auth login")),
+    ):
+        result = await _list_issues_tool("owner/name").ainvoke({})
+    assert result.startswith("Error: GitHub CLI is not authenticated — run `gh auth login`")
+
+
+@pytest.mark.asyncio
+async def test_repo_not_found_is_a_classified_error():
+    serr = "GraphQL: Could not resolve to a Repository with the name 'owner/gone'. (repository)"
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", serr))):
+        result = await _list_issues_tool().ainvoke({"repo": "owner/gone"})
+    assert result.startswith("Error: repo 'owner/gone' not found or not accessible")
+
+
+# ── github_status ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_status_tool_summarises_and_names_a_bad_default(monkeypatch):
+    tools = {t.name: t for t in get_read_tools("just-owner", ["o/a"])}
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        out = await tools["github_status"].ainvoke({})
+    assert out.startswith("GitHub CLI is NOT installed")
+    assert "NOTE: Error: github.default_repo must be 'owner/name' (got 'just-owner')" in out
+    assert "1 repo(s) in the picker: o/a" in out
+
+
+@pytest.mark.asyncio
+async def test_status_tool_reads_default_and_repos_through_getters():
+    calls = {"d": 0, "r": 0}
+
+    def d():
+        calls["d"] += 1
+        return "o/live"
+
+    def r():
+        calls["r"] += 1
+        return ["o/live", "o/x"]
+
+    tools = {t.name: t for t in get_read_tools(d, r)}
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        out = await tools["github_status"].ainvoke({})
+    assert "Default repo: o/live." in out and calls == {"d": 1, "r": 1}
+
+
+@pytest.mark.asyncio
+async def test_status_tool_reports_to_the_setup_gap_seam():
+    """The model's own check is a recovery observation too — it must clear the banner."""
+    calls = []
+
+    class _Seam:
+        def report_setup_gap(self, key, message):
+            calls.append((key, message))
+
+    tools = {t.name: t for t in get_read_tools("o/n", ["o/n"], registry=_Seam())}
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        await tools["github_status"].ainvoke({})
+    assert dict(calls)["gh"] and dict(calls)["auth"] is None
+
+
+@pytest.mark.asyncio
+async def test_path_exists_classifies_before_the_missing_verdict():
+    """An auth / rate-limit / missing-binary failure is UNVERIFIED (the classified error),
+    never MISSING — only a real 404 is a verdict, and it names the inaccessible-repo case."""
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(4, "", "please run: gh auth login"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("Error: GitHub CLI is not authenticated") and "MISSING" not in out
+    with patch(
+        "ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(127, "", "gh CLI is not installed or not on PATH."))
+    ):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("Error: gh CLI is not installed") and "MISSING" not in out
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "HTTP 403: API rate limit exceeded"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("Error: GitHub API rate limit hit")
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(1, "", "gh: Not Found (HTTP 404)"))):
+        out = await _path_exists_tool().ainvoke({"repo": "owner/name", "path": "x"})
+    assert out.startswith("MISSING: owner/name/x") and "repo is inaccessible" in out

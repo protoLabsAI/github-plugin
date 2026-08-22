@@ -15,9 +15,73 @@ DATA is the gated channel (the DS kit's ``apiFetch`` attaches the operator beare
 the postMessage handshake); slug-aware base (host window AND the fleet proxy); links the
 DS plugin-kit so the page is themed from the operator's live ``--pl-*`` tokens. Vanilla
 JS, no host build (ADR 0038).
+
+Both pages render a **setup card** (v0.6.0) from ``GET /status`` when `gh` is missing
+or not authenticated — or ``default_repo`` is malformed (#23) — telling the person what
+to do (install gh / `gh auth login` / paste a token in Settings ▸ GitHub). The card's
+CSS + JS are shared (``_SETUP_CSS`` / ``_SETUP_JS``, spliced into both pages) so the
+two surfaces can't drift. The fetch happens only inside the kit's ``initPluginView``
+boot (after the bearer handshake — #2926), like every other data call.
 """
 
 from __future__ import annotations
+
+# --- the shared setup card (spliced into both pages) --------------------------
+_SETUP_CSS = r"""
+  #setup{display:none;margin:8px;padding:10px 12px;border-radius:var(--pl-radius,8px);
+    border:1px solid var(--pl-color-border);background:var(--pl-color-bg);line-height:1.45}
+  #setup.show{display:block}
+  #setup .st{font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+  #setup .sd{color:var(--pl-color-fg-muted);font-size:12px}
+  #setup code{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-size:11px;
+    padding:1px 4px;border-radius:4px;background:var(--pl-color-bg-raised)}
+  #setup .sa{margin-top:7px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  #setup .warn{color:#d29922}
+"""
+
+_SETUP_JS = r"""
+  // The first-run setup card — rendered from /status (gh missing / not signed in /
+  // malformed default repo). Fetched ONLY from inside the kit boot (post-handshake).
+  let statusSeq = 0;
+  function setupCard(st){
+    const el = $("setup"); if(!el) return;
+    const lines = [];
+    if(!st || st.__failed){
+      lines.push('<div class="st"><span class="warn">!</span> Could not check GitHub CLI status</div>'
+        + '<div class="sd">The agent may be unreachable, or the status route is missing. Use Re-check.</div>');
+    } else if(!st.gh_path){
+      lines.push('<div class="st"><span class="warn">!</span> GitHub CLI (<code>gh</code>) is not installed</div>'
+        + '<div class="sd">The GitHub rail and tools need it. Install from <a href="https://cli.github.com" target="_blank" rel="noreferrer">cli.github.com</a>'
+        + ' (macOS: <code>brew install gh</code>; Debian/Ubuntu: <code>sudo apt install gh</code>), then sign in with <code>gh auth login</code>'
+        + ' in a terminal — or paste a personal access token in <b>Settings ▸ GitHub</b> (github.token).</div>');
+    } else if(!st.authenticated){
+      lines.push('<div class="st"><span class="warn">!</span> GitHub CLI is not signed in</div>'
+        + '<div class="sd">Found <code>gh</code>' + (st.gh_version ? ' v' + esc(st.gh_version) : '') + ' at <code>' + esc(st.gh_path) + '</code>'
+        + (st.error ? ' — ' + esc(st.error) : '') + '.<br>'
+        + (st.token_source === 'config'
+            ? 'The token saved in <b>Settings ▸ GitHub</b> (github.token) was rejected — replace it there, or clear it to fall back to <code>gh auth login</code>.'
+            : st.token_source === 'env'
+              ? 'The <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code> in the agent\'s environment was rejected — fix or unset it, or paste a working token in <b>Settings ▸ GitHub</b> (github.token).'
+              : 'Run <code>gh auth login</code> in a terminal, or paste a personal access token in <b>Settings ▸ GitHub</b> (github.token).')
+        + '</div>');
+    }
+    if(st && st.default_repo_error){
+      lines.push('<div class="st"><span class="warn">!</span> Default repo is malformed</div>'
+        + '<div class="sd">' + esc(st.default_repo_error) + '</div>');
+    }
+    if(!lines.length){ el.className = ""; el.innerHTML = ""; return; }
+    lines.push('<div class="sa"><button class="pl-btn pl-btn--sm" id="recheck" type="button">Re-check</button></div>');
+    el.innerHTML = lines.join(""); el.className = "show";
+    const b = $("recheck"); if(b) b.onclick = () => { b.disabled = true; b.textContent = "Checking…"; checkStatus(); };
+  }
+  async function checkStatus(){
+    const my = ++statusSeq;
+    try {
+      const st = await kit.apiFetch("/api/plugins/github/status").then(r => r.ok ? r.json() : { __failed: true });
+      if(my === statusSeq) setupCard(st);
+    } catch(e){ if(my === statusSeq) setupCard({ __failed: true }); }
+  }
+"""
 
 # --- the read-only board -----------------------------------------------------
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -57,6 +121,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .cmt{display:inline-flex;align-items:center;gap:3px}
   .pill{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--pl-color-border)}
   .empty,.hint{padding:24px 14px;text-align:center;color:var(--pl-color-fg-muted)}
+__SETUP_CSS__
 </style></head><body>
 <div id="wrap">
   <div class="bar">
@@ -69,6 +134,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <span class="spacer"></span>
     <button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>
   </div>
+  <div id="setup" role="status"></div>
   <div id="list"><div class="hint">Loading…</div></div>
 </div>
 <script type="module">
@@ -135,10 +201,12 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     } catch(e){ if(my===loadSeq) list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
   }
 
+__SETUP_JS__
   let booted = false;
   async function boot(){
     if (booted) return;  // the kit re-fires this on every re-theme + the handshake re-send;
     booted = true;       // build the picker and first-load EXACTLY once, or the list thrashes (#15).
+    checkStatus();       // the setup card, in parallel — never blocks the list
     let cfg = { repos: [], default_repo: "" };
     try { cfg = await kit.apiFetch("/api/plugins/github/config").then(r => r.json()); } catch(e){}
     const sel = $("repo");
@@ -178,8 +246,11 @@ NEW_ISSUE_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border:1px solid var(--pl-color-border);border-radius:var(--pl-radius,8px);padding:7px;font-size:12px}
   textarea{flex:1;min-height:140px;resize:vertical;font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace)}
   #res{font-size:11px;color:var(--pl-color-fg-muted);white-space:pre-wrap;min-height:16px}
+  #setup{margin:0}
+__SETUP_CSS__
 </style></head><body>
 <div id="wrap">
+  <div id="setup" role="status"></div>
   <div class="row">
     <select id="repo" title="Repository"></select>
     <select id="kind" style="max-width:130px"><option value="generic">Generic</option><option value="bug">Bug</option><option value="feature">Feature</option></select>
@@ -200,14 +271,18 @@ NEW_ISSUE_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
+__SETUP_JS__
   let booted = false;
   async function boot(){
     if (booted) return;  // kit re-fires on every re-theme; populate the picker once so it never
     booted = true;       // clobbers an in-progress repo selection (#15).
+    checkStatus();       // the setup card, in parallel — never blocks the form
     let cfg = { repos: [], default_repo: "" };
     try { cfg = await kit.apiFetch("/api/plugins/github/config").then(r => r.json()); } catch(e){}
-    $("repo").innerHTML = (cfg.repos||[]).map(r => '<option value="'+esc(r)+'">'+esc(r)+'</option>').join("");
-    if(cfg.default_repo){ $("repo").value = cfg.default_repo; }
+    const sel = $("repo");
+    sel.innerHTML = (cfg.repos||[]).map(r => '<option value="'+esc(r)+'">'+esc(r)+'</option>').join("");
+    if(cfg.default_repo){ sel.value = cfg.default_repo; }
+    if(!(cfg.repos||[]).length){ $("res").textContent = "No repositories configured — add one under Settings ▸ GitHub (github.default_repo / repos)."; }
   }
   async function submit(){
     const title = $("title").value.trim();
@@ -227,3 +302,7 @@ NEW_ISSUE_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   // Boot ONCE via the kit (after the theme/auth handshake) — not also directly (#13).
   kit.initPluginView(boot);
 </script></body></html>"""
+
+# Splice the shared setup card into both pages — one source, two surfaces.
+PAGE = PAGE.replace("__SETUP_CSS__", _SETUP_CSS).replace("__SETUP_JS__", _SETUP_JS)
+NEW_ISSUE_PAGE = NEW_ISSUE_PAGE.replace("__SETUP_CSS__", _SETUP_CSS).replace("__SETUP_JS__", _SETUP_JS)

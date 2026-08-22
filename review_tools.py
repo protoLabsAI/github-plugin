@@ -29,11 +29,9 @@ None → the tool ships with no description).
 
 from __future__ import annotations
 
-import json
-
 from langchain_core.tools import tool
 
-from .gh_cli import bad_repo, check_gh_error, run_gh
+from .gh_cli import bad_repo, check_gh_error, parse_json, run_gh
 from .gh_issue import resolve_repo
 
 # Check-run states that count as still-running. GitHub check runs carry
@@ -52,13 +50,13 @@ async def _viewer_login() -> str:
 async def _pr_head_and_author(repo: str, number: int) -> tuple[str, str, str]:
     """(head_sha, author_login, error). error is '' on success."""
     rc, out, serr = await run_gh(["pr", "view", str(number), "--repo", repo, "--json", "headRefOid,author"])
-    if gh_err := check_gh_error(rc, serr):
+    if gh_err := check_gh_error(rc, serr, repo=repo):
         return "", "", gh_err
-    try:
-        d = json.loads(out)
-    except json.JSONDecodeError:
-        return "", "", f"Error: could not parse gh output: {out[:200]}"
-    return str(d.get("headRefOid") or ""), str((d.get("author") or {}).get("login") or ""), ""
+    d, perr = parse_json(out, dict)
+    if perr:
+        return "", "", perr
+    author = d.get("author") if isinstance(d.get("author"), dict) else {}
+    return str(d.get("headRefOid") or ""), str(author.get("login") or ""), ""
 
 
 async def _ci_state(repo: str, head_sha: str) -> tuple[str, str]:
@@ -74,9 +72,8 @@ async def _ci_state(repo: str, head_sha: str) -> tuple[str, str]:
     )
     if rc != 0:
         return "unknown", (serr or out).strip()[:200]
-    try:
-        statuses = json.loads(out or "[]")
-    except json.JSONDecodeError:
+    statuses, perr = parse_json(out or "[]", list)
+    if perr:
         return "unknown", f"unparseable check-runs response: {out[:120]}"
     pending = [s for s in statuses if str(s).lower() in _NON_TERMINAL]
     if pending:
@@ -97,13 +94,10 @@ async def _post_review(repo: str, number: int, event: str, body: str) -> str:
             f"body={body}",
         ]
     )
-    if gh_err := check_gh_error(rc, serr):
+    if gh_err := check_gh_error(rc, serr, repo=repo):
         return gh_err
-    try:
-        d = json.loads(out)
-        url = d.get("html_url") or ""
-    except json.JSONDecodeError:
-        url = ""
+    d, _perr = parse_json(out, dict)
+    url = str(d.get("html_url") or "") if d else ""
     return f"Posted {event} review on {repo}#{number}." + (f" {url}" if url else "")
 
 
@@ -146,9 +140,9 @@ async def _guard_blocking_verdict(repo: str, number: int, verdict: str) -> str:
     return ""
 
 
-def get_review_tools(default_repo: str = "") -> list:
-    """Build the verdict tools. ``default_repo`` (``owner/name``) is used whenever a
-    tool's ``repo`` arg is omitted."""
+def get_review_tools(default_repo="") -> list:
+    """Build the verdict tools. ``default_repo`` (``owner/name``, or a zero-arg getter
+    returning it) is used whenever a tool's ``repo`` arg is omitted."""
 
     @tool
     async def github_review_comment(number: int, body: str, repo: str = "") -> str:
