@@ -1,10 +1,13 @@
 """The `/issue` chat control command — file a GitHub issue from a chat message.
 
-This is the WRITE counterpart to the read tools that is deliberately NOT an agent
-tool: creating an issue is a write the model must not do autonomously, so the host
-exposes it as a user-only `/issue` chat control command (like `/goal`). The plugin
-registers it via `registry.register_chat_command("issue", …)` (host seam); this module
-is the pure, host-free logic behind it.
+`/issue` is the USER-ONLY chat path for filing an issue: the host exposes it as a
+chat control command (like `/goal`) via `registry.register_chat_command("issue", …)`,
+so a person can file from the composer on any agent — including a read-only one —
+without the model being involved. The `github_create_issue` AGENT tool exists too
+(write_tools.py), behind the per-agent `github.write` gate: a PM/coding agent with
+write on can file autonomously; a research agent without it cannot. Both paths share
+`file_issue` below, so the gate check and the `gh issue create` argv can't diverge.
+This module is the pure, host-free logic.
 
 `run_issue_command(rest, *, default_repo)` takes everything after the `/issue` token
 (the host already matched it) and returns the reply string. The issue body is checked
@@ -13,19 +16,25 @@ Problem/Motivation section; `--bug` also wants repro/evidence; `--feature` wants
 proposed-direction or acceptance section), so an issue filed here always passes.
 
 Repo resolution (no silent misrouting): explicit `--repo` > the plugin's configured
-`github.default_repo` (passed in as `default_repo`) > `GITHUB_DEFAULT_REPO` / `GH_REPO`
-env > an error asking for one. Auth rides on `gh_cli` (`GITHUB_TOKEN`/`GH_TOKEN` or
-ambient `gh auth`); `gh issue create` needs write scope.
+`github.default_repo` (passed in as `default_repo`; itself resolved from default_repo
+> first of repos > the host's project registry > a checkout's origin remote, see
+projects.py) > `GITHUB_DEFAULT_REPO` / `GH_REPO` env (logged at INFO when it fires —
+it's the one non-obvious source) > an error asking for one. Auth rides on `gh_cli`
+(the `github.token` secret, `GITHUB_TOKEN`/`GH_TOKEN`, or ambient `gh auth`);
+`gh issue create` needs write scope.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
 from dataclasses import dataclass, field
 
 from .gh_cli import REPO_RE, check_gh_error, run_gh
+
+log = logging.getLogger("protoagent.plugins.github")
 
 # Section detectors — kept in lockstep with the host CI gate's regexes so the local
 # check and the server-side gate can never disagree about what "conforms" means.
@@ -107,23 +116,59 @@ def labels_for(kind: str, extra: list[str] | None = None) -> list[str]:
     return out
 
 
-def resolve_repo(explicit: str | None, default_repo: str = "") -> str | None:
-    """Target repo: explicit ``--repo`` > configured default > GITHUB_DEFAULT_REPO
-    / GH_REPO env > ``None`` (caller errors — there is no silent default)."""
+def current_default(default_repo) -> str:
+    """Materialise a default repo that may be a plain string OR a zero-arg getter.
+    The tools take a GETTER (``__init__.py``) so a ``default_repo``/``repos``/registry
+    edit — or an ``onboard_project`` mid-session — is seen by the very next tool call,
+    not at the next register(). A raising getter reads as "no default"."""
+    if callable(default_repo):
+        try:
+            return str(default_repo() or "").strip()
+        except Exception:  # noqa: BLE001 — a broken getter must not kill a tool call
+            log.debug("[github] default-repo getter failed", exc_info=True)
+            return ""
+    return str(default_repo or "").strip()
+
+
+def default_repo_error(value: str) -> str | None:
+    """The NAMED error for a malformed configured default (#23): ``github.default_repo``
+    must be ``owner/name``. ``None`` when it's blank (unset is fine) or well-formed."""
+    v = (value or "").strip()
+    if not v or REPO_RE.match(v):
+        return None
     return (
-        (explicit or "").strip()
-        or (default_repo or "").strip()
-        or os.environ.get("GITHUB_DEFAULT_REPO")
-        or os.environ.get("GH_REPO")
-        or None
+        f"Error: github.default_repo must be 'owner/name' (got {v!r}) — fix it in Settings ▸ GitHub, "
+        "or pass repo='owner/name' explicitly."
     )
+
+
+def resolve_repo(explicit: str | None, default_repo="") -> str | None:
+    """Target repo: explicit ``--repo`` > configured default > GITHUB_DEFAULT_REPO
+    / GH_REPO env > ``None`` (caller errors — there is no silent default).
+
+    ``default_repo`` may be a string or a zero-arg getter (evaluated only when no
+    explicit repo was passed — see ``current_default``). The env step is the only
+    source a person can't see in Settings, so it's logged at INFO whenever it's what
+    actually decided the repo (never silently)."""
+    chosen = (explicit or "").strip() or current_default(default_repo)
+    if chosen:
+        return chosen
+    for var in ("GITHUB_DEFAULT_REPO", "GH_REPO"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            log.info("[github] no repo passed or configured — using %s=%s from the environment", var, val)
+            return val
+    return None
 
 
 def effective_default_repo(default_repo: str, repos: list[str] | None = None) -> str:
     """The preselected default repo for the dialog + the ``/issue`` command: the
     explicit ``github.default_repo`` if set, else the first entry in the
-    ``github.repos`` picker list, else ``""`` (env still applies via
-    ``resolve_repo``). Keeps the command and the dialog agreeing on the default."""
+    ``github.repos`` picker list (explicit ∪ registry ∪ checkout remotes), else
+    ``""`` (env still applies via ``resolve_repo``). Keeps the command, the tools
+    and the dialog agreeing on the default. A malformed explicit default is returned
+    as-is so the caller's ``bad_repo`` / ``default_repo_error`` names it instead of
+    silently routing to the next candidate."""
     if (default_repo or "").strip():
         return default_repo.strip()
     for r in repos or []:
@@ -214,6 +259,7 @@ def _parse(rest: str, *, default_repo: str = "") -> IssueRequest | str:
 
     title = " ".join(title_parts).strip()
     labels = labels_for(kind, labels)
+    explicit_repo = repo
     repo = resolve_repo(repo, default_repo)
 
     if not title:
@@ -228,6 +274,8 @@ def _parse(rest: str, *, default_repo: str = "") -> IssueRequest | str:
             "in Settings (or the `GITHUB_DEFAULT_REPO` env var)."
         )
     if not REPO_RE.match(repo):
+        if not (explicit_repo or "").strip():
+            return default_repo_error(repo) or f"Error: repo must be 'owner/name' (got {repo!r})."
         return f"Error: --repo must be 'owner/name' (got {repo!r})."
 
     return IssueRequest(title=title, body=body, kind=kind, repo=repo, labels=labels, dry_run=dry_run)
