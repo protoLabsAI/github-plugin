@@ -44,6 +44,11 @@ _CHECK_FAIL = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", 
 _CHECK_SKIP = {"SKIPPED", "NEUTRAL", "STALE"}
 
 
+def _login(actor) -> str:
+    """``author.login`` from a gh actor object — ``?`` for a missing/null/scalar actor."""
+    return str(actor.get("login") or "?") if isinstance(actor, dict) else "?"
+
+
 def _one_line(text: str, cap: int) -> str:
     """Collapse whitespace and cap — for a review/comment excerpt on one line."""
     t = " ".join((text or "").split())
@@ -130,7 +135,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
                 repo,
                 "--json",
                 "number,title,state,isDraft,author,body,additions,deletions,files,url,headRefName,baseRefName,"
-                "reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews",
+                "reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,latestReviews",
             ]
         )
         if gh_err := check_gh_error(rc, serr, repo=repo):
@@ -142,18 +147,23 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         draft = " (DRAFT)" if d.get("isDraft") else ""
         checks = _summarize_checks(d.get("statusCheckRollup"))
         reviews = dicts(d.get("reviews"))
+        # `latestReviews` = ONE review per reviewer, their most recent — the set that
+        # actually decides reviewDecision, so a dozen bot COMMENTED reviews can never
+        # push a human's CHANGES_REQUESTED out of view. Older gh without the field (or
+        # a PR with none) falls back to the NEWEST `reviews`, never the oldest.
+        latest = dicts(d.get("latestReviews")) or reviews[-_MAX_REVIEWS:]
         review_lines = [
-            f"  - {str((r.get('author') or {}).get('login') or '?') if isinstance(r.get('author'), dict) else '?'} "
+            f"  - {_login(r.get('author'))} "
             f"[{r.get('state') or '?'}]"
             + (f": {_one_line(str(r.get('body') or ''), 300)}" if str(r.get("body") or "").strip() else "")
-            for r in reviews[:_MAX_REVIEWS]
+            for r in latest[-_MAX_REVIEWS:]
         ]
-        if len(reviews) > _MAX_REVIEWS:
-            review_lines.append(f"  … {len(reviews) - _MAX_REVIEWS} more review(s)")
+        if len(reviews) > len(review_lines):
+            review_lines.append(f"  … {len(reviews) - len(review_lines)} more review(s) (older / superseded)")
         text = (
             f"PR #{d.get('number')} [{d.get('state')}]{draft} {d.get('title')}\n"
             f"branch: {d.get('headRefName', '?')} -> {d.get('baseRefName', '?')}\n"
-            f"by {(d.get('author') or {}).get('login', '?') if isinstance(d.get('author'), dict) else '?'} | "
+            f"by {_login(d.get('author'))} | "
             f"+{d.get('additions', 0)}/-{d.get('deletions', 0)} | {d.get('url')}\n"
             f"review decision: {d.get('reviewDecision') or 'none yet'} | "
             f"mergeable: {d.get('mergeable') or '?'} | merge state: {d.get('mergeStateStatus') or '?'}\n"
@@ -185,7 +195,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         labels = ", ".join(str(lbl.get("name", "")) for lbl in dicts(d.get("labels")))
         return (
             f"Issue #{d.get('number')} [{d.get('state')}] {d.get('title')}\n"
-            f"by {(d.get('author') or {}).get('login', '?')} | labels: {labels or '(none)'} | "
+            f"by {_login(d.get('author'))} | labels: {labels or '(none)'} | "
             f"{d.get('url')}\n\n{(d.get('body') or '').strip()[:2000]}"
         )
 
@@ -533,7 +543,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
             return f"No {state} pull requests in {repo}."
         lines = [f"{len(items)} {state} pull request(s) in {repo}:"]
         for it in items:
-            author = (it.get("author") or {}).get("login", "?") if isinstance(it.get("author"), dict) else "?"
+            author = _login(it.get("author"))
             flags = [
                 x
                 for x in (("draft" if it.get("isDraft") else ""), it.get("reviewDecision"), it.get("mergeStateStatus"))
@@ -580,12 +590,12 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         )
         lines = [head + ":"]
         for c in shown:
-            author = (c.get("author") or {}).get("login", "?") if isinstance(c.get("author"), dict) else "?"
+            author = _login(c.get("author"))
             body = " ".join(str(c.get("body") or "").split())
             if len(body) > _MAX_COMMENT_CHARS:
                 body = body[: _MAX_COMMENT_CHARS - 1] + "…"
             lines.append(f"--- {author} · {c.get('createdAt') or '?'}\n{body or '(empty)'}")
-        return "\n".join(lines)
+        return _bounded("\n".join(lines), _MAX_PR_CHARS)
 
     @tool
     async def github_search_issues(query: str, repo: str = "", state: str = "open", limit: int = 20) -> str:
@@ -610,19 +620,13 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
             capped = max(1, min(int(limit), 100))
         except (TypeError, ValueError):
             capped = 20
-        args = [
-            "search",
-            "issues",
-            "--repo",
-            repo,
-            query.strip(),
-            "--limit",
-            str(capped),
-            "--json",
-            "number,title,state,url",
-        ]
+        # Flags first, the query LAST after `--`: a query starting with a qualifier
+        # like `-label:bug` is otherwise parsed as an unknown shorthand flag (verified
+        # live against gh 2.92 — with `--` it works).
+        args = ["search", "issues", "--repo", repo, "--limit", str(capped), "--json", "number,title,state,url"]
         if state != "all":  # gh's --state is open|closed only; "all" = no filter
             args += ["--state", state]
+        args += ["--", query.strip()]
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err

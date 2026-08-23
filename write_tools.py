@@ -31,7 +31,7 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from .gh_cli import bad_repo, check_gh_error, run_gh
-from .gh_issue import labels_for, missing_sections, resolve_repo, scaffold_for
+from .gh_issue import infer_kind, labels_for, missing_sections, resolve_repo, scaffold_for
 
 
 def _csv(value: str) -> list[str]:
@@ -81,7 +81,9 @@ def get_write_tools(default_repo="", emit=None) -> list:
             body: Issue body (Markdown) — use headings for the sections above.
             labels: Optional comma-separated label names.
             kind: ``generic`` (default) | ``bug`` | ``feature`` — picks the gate's required
-                sections and adds the type label (``bug`` / ``enhancement``).
+                sections and adds the type label (``bug`` / ``enhancement``). A ``generic``
+                call whose ``labels`` include ``bug`` / ``enhancement`` is treated as that
+                kind (the repo's CI gate keys on the label).
 
         Returns the new issue URL, or the gate's "Not filed — missing …" with a scaffold.
         """
@@ -91,6 +93,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
         kind = (kind or "generic").strip().lower()
         if kind not in ("bug", "feature", "generic"):
             return f"Error: kind must be 'bug', 'feature' or 'generic' (got {kind!r})."
+        kind = infer_kind(kind, _csv(labels))
         if miss := missing_sections(body or "", kind):
             return (
                 "Not filed — the issue body is missing " + "; ".join(miss) + ". "

@@ -557,16 +557,63 @@ async def test_get_pr_with_no_checks_or_reviews_says_so():
 
 @pytest.mark.asyncio
 async def test_get_pr_output_is_bounded():
+    """A huge body + 40 long reviews + long file paths must end at the bound — and the
+    bound must actually be hit: the body is capped at 2000, reviews at 10 × 300, files
+    at 20 entries, so only the (uncapped) path lengths can carry this past 12k."""
     from ghplugin.read_tools import _MAX_PR_CHARS
 
     d = {
         **json.loads(_RICH_PR_JSON),
         "body": "b" * 50000,
-        "reviews": [{"author": {"login": "r"}, "state": "COMMENTED", "body": "y" * 2000}] * 40,
+        "files": [{"path": "p" * 700 + "/module_%02d.py" % i} for i in range(20)],
+        "reviews": [{"author": {"login": f"r{i}"}, "state": "COMMENTED", "body": "y" * 2000} for i in range(40)],
+        "latestReviews": [{"author": {"login": f"r{i}"}, "state": "COMMENTED", "body": "y" * 2000} for i in range(40)],
     }
     with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
         out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
-    assert len(out) <= _MAX_PR_CHARS + 60 and "… 30 more review(s)" in out
+    assert out.endswith(f"… (truncated at {_MAX_PR_CHARS} chars)")
+    assert len(out) == _MAX_PR_CHARS + len(f"\n… (truncated at {_MAX_PR_CHARS} chars)")
+    assert "… 30 more review(s)" in out
+
+
+@pytest.mark.asyncio
+async def test_get_pr_shows_latest_review_per_reviewer_not_the_oldest_ten():
+    """11 bot COMMENTED reviews must not push a human's CHANGES_REQUESTED out of view:
+    `latestReviews` (one per reviewer) is what's shown; without it, the NEWEST reviews."""
+    bots = [{"author": {"login": "coderabbitai"}, "state": "COMMENTED", "body": f"nit {i}"} for i in range(11)]
+    human = {"author": {"login": "kj"}, "state": "CHANGES_REQUESTED", "body": "blocker"}
+    d = {**json.loads(_PR_JSON), "reviews": bots + [human], "latestReviews": [bots[-1], human]}
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
+        out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
+    assert "  - kj [CHANGES_REQUESTED]: blocker" in out and "nit 10" in out and "nit 0" not in out
+    assert "reviews (12):" in out and "… 10 more review(s) (older / superseded)" in out
+    # older gh (no latestReviews): the newest N, never the oldest N
+    d.pop("latestReviews")
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
+        out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
+    assert "kj [CHANGES_REQUESTED]" in out and "nit 0" not in out and "nit 1]" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_pr_and_comments_tolerate_nested_scalars():
+    """`statusCheckRollup: 42` / `reviews: 42` / `comments: 42` — dicts() is total."""
+    d = {**json.loads(_PR_JSON), "statusCheckRollup": 42, "reviews": 42, "latestReviews": "x", "files": 7}
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
+        out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
+    assert "checks: none" in out and "reviews (0): none" in out and "files: (none)" in out
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, '{"comments": 42}', ""))):
+        out = await _tool("github_issue_comments").ainvoke({"repo": "owner/name", "number": 1})
+    assert out == "No comments on owner/name#1."
+
+
+@pytest.mark.asyncio
+async def test_issue_comments_output_is_bounded():
+    from ghplugin.read_tools import _MAX_PR_CHARS
+
+    comments = [{"author": {"login": "u"}, "createdAt": "d", "body": "z" * 999} for _ in range(30)]
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps({"comments": comments}), ""))):
+        out = await _tool("github_issue_comments").ainvoke({"repo": "owner/name", "number": 1, "limit": 30})
+    assert out.endswith(f"… (truncated at {_MAX_PR_CHARS} chars)")
 
 
 def test_summarize_checks_shapes():
@@ -688,7 +735,8 @@ async def test_search_issues_argv_and_render():
             {"repo": "owner/name", "query": " default_repo typo ", "state": "closed", "limit": 5}
         )
     argv = mock.call_args.args[0]
-    assert argv[:4] == ["search", "issues", "--repo", "owner/name"] and argv[4] == "default_repo typo"
+    assert argv[:4] == ["search", "issues", "--repo", "owner/name"]
+    assert argv[-2:] == ["--", "default_repo typo"]  # the query LAST, after the separator
     assert argv[argv.index("--limit") + 1] == "5" and argv[argv.index("--state") + 1] == "closed"
     assert (
         out
@@ -709,6 +757,18 @@ async def test_search_issues_all_state_omits_the_flag_and_validates():
         await _tool("github_search_issues").ainvoke({"repo": "owner/name", "query": "x", "state": "merged"})
     )
     mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_search_issues_query_starting_with_a_qualifier_is_not_a_flag():
+    """`-label:bug` as the first token was parsed by gh as an unknown shorthand flag;
+    with flags first and `--` before the query it's a query (verified live, gh 2.92)."""
+    mock = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        await _tool("github_search_issues").ainvoke({"repo": "owner/name", "query": "-label:bug crash"})
+    argv = mock.call_args.args[0]
+    assert argv[-2:] == ["--", "-label:bug crash"]
+    assert all(not a.startswith("-label") for a in argv[: argv.index("--")])  # never before the separator
 
 
 def test_search_issues_description_says_dedupe_before_filing():

@@ -234,8 +234,12 @@ def parse_json(out: str, expect: type | tuple[type, ...] = dict) -> tuple[Any, s
 
 
 def dicts(items) -> list[dict]:
-    """Only the dict rows of a `gh --json` list — nulls/scalars in a row list are skipped."""
-    return [x for x in (items or []) if isinstance(x, dict)]
+    """Only the dict rows of a `gh --json` list — nulls/scalars in a row list are skipped,
+    and a value that isn't a list at all (a nested scalar like ``"reviews": 42``) is ``[]``.
+    Total by design: a tool feeds it any nested field without a type check of its own."""
+    if not isinstance(items, list):
+        return []
+    return [x for x in items if isinstance(x, dict)]
 
 
 # ── error classification ──────────────────────────────────────────────────────────

@@ -57,8 +57,8 @@ async def test_labels_split_into_separate_flags():
     tool = _create_issue()
     fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/7", ""))
     with patch("ghplugin.write_tools.run_gh", fake):
-        await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY, "labels": "bug, enhancement ,"})
-    assert _labels_in(fake.call_args.args[0]) == ["bug", "enhancement"]
+        await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY, "labels": "p0, needs-triage ,"})
+    assert _labels_in(fake.call_args.args[0]) == ["p0", "needs-triage"]
 
 
 async def test_bad_repo_short_circuits():
@@ -135,18 +135,55 @@ async def test_create_issue_rejects_an_unknown_kind():
     assert out.startswith("Error: kind must be")
 
 
-async def test_create_issue_gate_matches_the_issue_command():
-    """One gate, two entry points: whatever /issue refuses, the tool refuses, and vice versa."""
-    from ghplugin.gh_issue import missing_sections
-
-    for kind, body in (("generic", "too short"), ("bug", _OK_BODY), ("feature", _OK_BODY), ("generic", _OK_BODY)):
-        tool_out = (
-            await _create_issue().ainvoke({"repo": "o/n", "title": "t", "body": body, "kind": kind})
-            if missing_sections(body, kind)
-            else None
+async def test_create_issue_generic_with_a_bug_label_demands_repro_like_ci():
+    """protoAgent's CI issue gate keys on the LABEL: a `labels="bug"` issue without a repro
+    section would be flagged server-side, so a generic call with that label is gated as
+    a bug here (and `enhancement` as a feature)."""
+    tool = _create_issue()
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/11", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY, "labels": "bug"})
+    assert out.startswith("Not filed") and "Steps to reproduce" in out
+    fake.assert_not_called()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke(
+            {"repo": "o/n", "title": "t", "body": _OK_BODY + "\n## Root cause\nOff by one.", "labels": "bug"}
         )
-        if missing_sections(body, kind):
-            assert tool_out.startswith("Not filed")
+    assert out.endswith("/issues/11") and _labels_in(fake.call_args.args[0]) == ["bug"]  # not doubled
+    # `enhancement` → feature; _OK_BODY has an Acceptance section, so it passes
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "title": "t", "body": _OK_BODY, "labels": "enhancement, p1"})
+    assert out.endswith("/issues/11") and _labels_in(fake.call_args.args[0]) == ["enhancement", "p1"]
+
+
+async def test_create_issue_gate_matches_the_issue_command():
+    """One gate, two entry points: for every (kind, body) the tool and the /issue command
+    BOTH refuse or BOTH file — checked in both directions against the same gh stub."""
+    from ghplugin.gh_issue import run_issue_command
+
+    cases = [
+        ("generic", "too short", False),
+        ("generic", _OK_BODY, True),
+        ("bug", _OK_BODY, False),  # no repro
+        ("bug", _OK_BODY + "\n## Steps to reproduce\nRun it.", True),
+        ("feature", "## Motivation\nWe need this capability badly for the next release cycle to ship on time.", False),
+        ("feature", _OK_BODY, True),  # Acceptance satisfies a feature
+    ]
+    for kind, body, should_file in cases:
+        tool_gh = AsyncMock(return_value=(0, "https://github.com/o/n/issues/1", ""))
+        cmd_gh = AsyncMock(return_value=(0, "https://github.com/o/n/issues/1", ""))
+        with patch("ghplugin.write_tools.run_gh", tool_gh):
+            tool_out = await _create_issue().ainvoke({"repo": "o/n", "title": "t", "body": body, "kind": kind})
+        flag = {"bug": " --bug", "feature": " --feature"}.get(kind, "")
+        with patch("ghplugin.gh_issue.run_gh", cmd_gh):
+            cmd_out = await run_issue_command(f"t{flag} --repo o/n\n{body}", default_repo="")
+        assert (tool_gh.called, cmd_gh.called) == (should_file, should_file), (kind, body[:30])
+        if should_file:
+            assert tool_out.endswith("/issues/1") and cmd_out.endswith("/issues/1")
+            assert tool_gh.call_args.args[0][:6] == cmd_gh.call_args.args[0][:6]  # same gh argv head
+            assert _labels_in(tool_gh.call_args.args[0]) == _labels_in(cmd_gh.call_args.args[0])
+        else:
+            assert tool_out.startswith("Not filed") and cmd_out.startswith("Not filed")
 
 
 def _comment():

@@ -194,6 +194,7 @@ def test_inventory_counts_match_the_docs(make_registry):
     review = {"github_review_comment", "github_review_approve", "github_review_request_changes"}
     assert len(READ_TOOLS) == 15 and len(WRITE_TOOLS) == 8 and len(review) == 3
     assert names == READ_TOOLS | WRITE_TOOLS | review and len(names) == 26
-    for doc in ("README.md", "PROTO.md"):
-        text = (Path(__file__).resolve().parent.parent / doc).read_text()
-        assert "15" in text and ("= 26" in text or "26 tools" in text), f"{doc} inventory stale"
+    root = Path(__file__).resolve().parent.parent
+    assert "15 read / 8 write / 3 review = 26" in (root / "PROTO.md").read_text(), "PROTO.md inventory stale"
+    readme = (root / "README.md").read_text()
+    assert "**Read** (always, 15)" in readme and "26 tools in all" in readme, "README inventory stale"

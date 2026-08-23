@@ -65,6 +65,25 @@ _SHAPES = {
     ),
     "list": (0, json.dumps([{"type": "file", "name": "x", "path": "x", "size": 1}, "not-a-dict", 7]), ""),
     "list-of-nulls": (0, "[null, null]", ""),
+    # every nested field a tool reads is a SCALAR — dicts()/parse_json must be total
+    "nested-scalars": (
+        0,
+        json.dumps(
+            {
+                "files": 7,
+                "labels": 1,
+                "statusCheckRollup": 42,
+                "reviews": 42,
+                "latestReviews": 0,
+                "comments": 42,
+                "author": 3,
+                "head": 5,
+                "hosts": 1,
+                "check_runs": 2,
+            }
+        ),
+        "",
+    ),
     "empty": (0, "", ""),
     "garbage": (0, "<<<not json>>> \x00\xff", ""),
     "number": (0, "42", ""),

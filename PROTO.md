@@ -106,19 +106,26 @@ self-diagnosis tool the model calls when another tool errors (no `write` gate), 
 PM verbs (v0.7.0): `github_list_prs` (reuses `api.fetch_prs`, so the tool and the board
 can't disagree — draft / review decision / merge state per row), `github_issue_comments`
 (`gh issue view --json comments`; works on PRs; newest `limit` in chronological order,
-bodies ≤ 1000 chars), `github_search_issues` (`gh search issues --repo`; `state: all` =
-no `--state` flag, gh only knows open|closed — documented as "dedupe before filing").
+bodies ≤ 1000 chars), `github_search_issues` (`gh search issues --repo … -- <query>`: flags first, the query
+LAST after `--` so a leading qualifier like `-label:bug` isn't read as a flag; `state:
+all` = no `--state` flag, gh only knows open|closed — documented as "dedupe before
+filing").
 `github_get_pr` carries the merge-readiness picture: `reviewDecision`, `mergeable`,
 `mergeStateStatus`, `statusCheckRollup` summarised (N pass / fail / pending + the
-failing names — both the CheckRun and StatusContext shapes), `reviews` (author, state,
-≤ 300-char body, ≤ 10 shown), `isDraft`; total output bounded at 12k chars.
+failing names — both the CheckRun and StatusContext shapes), `latestReviews` (ONE per
+reviewer, their most recent — so bot COMMENTED reviews can't bury a human's
+CHANGES_REQUESTED; older gh falls back to the NEWEST `reviews`), `isDraft`; total output
+bounded at 12k chars (`github_issue_comments` too).
 
 **Write (gated on `github.write`)** —
 `github_create_issue` (**body-gated**: the SAME `missing_sections` gate the `/issue`
 command enforces — a thin body, or a `bug` without repro / a `feature` without a
 direction-or-acceptance section, is refused with the scaffold and never posted; `kind`
-also adds the type label via `labels_for`) / `github_comment` / `github_create_pr`
-(return the new URL),
+also adds the type label via `labels_for`, and a `generic` call whose labels carry
+`bug` / `enhancement` is gated as that kind because protoAgent's CI issue gate keys on
+the label. The section regexes are in LOCKSTEP with `.github/workflows/issue-gate.yml`
+in protoAgent — change both, `test_section_regexes_match_protoagents_ci_gate` pins a
+sample per alternative) / `github_comment` / `github_create_pr` (return the new URL),
 `github_edit_pr` (`gh pr edit` + `gh pr ready [--undo]`),
 `github_merge_pr` (`gh pr merge` — **refuses without `confirm=true`**, offers `dry_run`),
 `github_close` (close/reopen issue|pr), and `github_set_labels` / `github_set_assignees`
