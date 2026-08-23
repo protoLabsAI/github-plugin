@@ -2,14 +2,15 @@
 # Keep `version` in lockstep with pyproject.toml (tests/test_version.py asserts it).
 id: github
 name: GitHub (read/write tools)
-version: 0.6.0
+version: 0.7.0
 description: >-
   Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
-  read tools (PRs, issues, diffs, CI, repo files/contents) are always on; the write
+  read tools (PRs — list + merge readiness, issues, comments, search-before-filing,
+  diffs, CI, repo files/contents) are always on; the write
   tools (create/edit/merge/close issues & PRs, comment, labels, assignees) load ONLY
   when `github.write: true` — so a research/Lead agent stays read-only while a
   coding/PM agent gets write, purely by its own per-instance config (ADR 0019).
-  Merging is `confirm`-guarded. Supersedes the read-only in-tree `github` plugin.
+  Merging is `confirm`-guarded; issue creation is body-gated like `/issue`. Supersedes the read-only in-tree `github` plugin.
   Tools degrade to a readable, classified error (not authenticated / repo not found /
   rate-limited / `gh` missing) — and `github_status` + a setup card in the views say
   exactly what to fix on a fresh machine.

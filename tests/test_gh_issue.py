@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from ghplugin.gh_issue import (
     current_default,
     default_repo_error,
@@ -34,6 +35,56 @@ def test_missing_sections_by_kind():
     # A feature needs a proposal OR acceptance section.
     feat = "## Motivation\nWe need this capability badly for the next release cycle to ship on time."
     assert "a Proposed-direction or Acceptance section" in missing_sections(feat, "feature")
+
+
+@pytest.mark.parametrize(
+    "key,heading",
+    [
+        ("problem", "Observed"),
+        ("problem", "Symptom"),
+        ("problem", "Idea"),
+        ("problem", "Current behavior"),
+        ("problem", "What happens"),
+        ("repro", "Root cause"),
+        ("repro", "Symptom"),
+        ("proposal", "Proposed work"),
+        ("proposal", "Plan"),
+    ],
+)
+def test_section_regexes_match_protoagents_ci_gate(key, heading):
+    """Lockstep with .github/workflows/issue-gate.yml — a heading CI accepts must be
+    accepted here (else the tool refuses a body CI would pass)."""
+    from ghplugin.gh_issue import _has_section
+
+    assert _has_section(f"## {heading}\nbody", key)
+    assert _has_section(f"**{heading}**\nbody", key)  # the bold-line form too
+
+
+def test_whatever_does_not_match_the_word_boundary_what():
+    from ghplugin.gh_issue import _has_section
+
+    assert not _has_section("## Whatever\nbody", "problem")
+    assert not _has_section("## Network\nbody", "proposal")  # \bwork\b, not "network"
+
+
+def test_infer_kind_promotes_generic_by_label():
+    from ghplugin.gh_issue import infer_kind
+
+    assert infer_kind("generic", ["bug"]) == "bug"
+    assert infer_kind("generic", ["Enhancement", "p1"]) == "feature"
+    assert infer_kind("generic", ["p1"]) == "generic"
+    assert infer_kind("feature", ["bug"]) == "feature"  # explicit wins
+    assert infer_kind("", None) == "generic"
+
+
+async def test_issue_command_label_bug_demands_repro(monkeypatch):
+    """`/issue t --label bug` without --bug is still a bug for the gate (CI keys on the label)."""
+    fake = AsyncMock()
+    body = "## Problem\nThe parser crashes on empty input and we should handle it gracefully across the whole pipeline."
+    with patch("ghplugin.gh_issue.run_gh", fake):
+        out = await run_issue_command(f"Crash --label bug --repo o/n\n{body}", default_repo="")
+    assert out.startswith("Not filed") and "Steps to reproduce" in out
+    fake.assert_not_called()
 
 
 def test_labels_for_prepends_type_label():

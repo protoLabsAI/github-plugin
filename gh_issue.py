@@ -5,9 +5,11 @@ chat control command (like `/goal`) via `registry.register_chat_command("issue",
 so a person can file from the composer on any agent — including a read-only one —
 without the model being involved. The `github_create_issue` AGENT tool exists too
 (write_tools.py), behind the per-agent `github.write` gate: a PM/coding agent with
-write on can file autonomously; a research agent without it cannot. Both paths share
-`file_issue` below, so the gate check and the `gh issue create` argv can't diverge.
-This module is the pure, host-free logic.
+write on can file autonomously; a research agent without it cannot. Both paths run
+the SAME body gate (`missing_sections` / `infer_kind` / `labels_for` below), so what
+the command refuses the tool refuses — and what passes here passes protoAgent's CI
+issue gate too (the regexes are kept in lockstep with it). This module is the pure,
+host-free logic.
 
 `run_issue_command(rest, *, default_repo)` takes everything after the `/issue` token
 (the host already matched it) and returns the reply string. The issue body is checked
@@ -36,12 +38,19 @@ from .gh_cli import REPO_RE, check_gh_error, run_gh
 
 log = logging.getLogger("protoagent.plugins.github")
 
-# Section detectors — kept in lockstep with the host CI gate's regexes so the local
-# check and the server-side gate can never disagree about what "conforms" means.
+# Section detectors — kept in LOCKSTEP with protoAgent's CI issue gate
+# (.github/workflows/issue-gate.yml: hasProblem / hasRepro / hasProposal / hasAcceptance)
+# so the local check and the server-side gate can never disagree about what
+# "conforms" means: a body this gate passes must pass CI, and vice versa. When the
+# host's regexes change, change these — tests/test_gh_issue.py pins a sample per
+# alternative.
 _SECTION_RES = {
-    "problem": re.compile(r"problem|what'?s? wrong|motivation|background|context|summary", re.I),
-    "repro": re.compile(r"repro|reproduce|steps|evidence|expected|actual|observed", re.I),
-    "proposal": re.compile(r"propos|solution|approach|direction|fix|design", re.I),
+    "problem": re.compile(
+        r"problem|what'?s? wrong|motivation|background|context|summary|observed|symptom|idea|current behavior|\bwhat\b",
+        re.I,
+    ),
+    "repro": re.compile(r"repro|reproduce|steps|evidence|expected|actual|observed|symptom|root cause", re.I),
+    "proposal": re.compile(r"propos|solution|approach|direction|fix|design|\bwork\b|plan", re.I),
     "acceptance": re.compile(r"acceptance|done when|success criteria|definition of done", re.I),
 }
 # A heading (#..######) or a bold line (**…**) — same shape the gate matches.
@@ -86,6 +95,12 @@ def _scaffold(kind: str) -> str:
     return {"bug": _BUG_SCAFFOLD, "feature": _FEATURE_SCAFFOLD}.get(kind, _GENERIC_SCAFFOLD)
 
 
+def scaffold_for(kind: str) -> str:
+    """The fill-in scaffold for an issue ``kind`` — what both the `/issue` command and
+    the `github_create_issue` tool hand back when the body fails the gate."""
+    return _scaffold(kind)
+
+
 def missing_sections(body: str, kind: str) -> list[str]:
     """The gate-required sections absent from ``body`` for this issue ``kind``."""
     miss: list[str] = []
@@ -100,6 +115,22 @@ def missing_sections(body: str, kind: str) -> list[str]:
     if kind == "feature" and not (_has_section(body, "proposal") or _has_section(body, "acceptance")):
         miss.append("a Proposed-direction or Acceptance section")
     return miss
+
+
+def infer_kind(kind: str, labels: list[str] | None = None) -> str:
+    """The gate ``kind`` to enforce: an explicit ``bug`` / ``feature`` wins; a
+    ``generic`` request carrying a ``bug`` / ``enhancement`` LABEL is promoted to
+    that kind — because the CI gate keys on the labels, so a ``labels="bug"`` issue
+    filed without a repro section would be refused server-side anyway."""
+    k = (kind or "generic").strip().lower()
+    if k in ("bug", "feature"):
+        return k
+    low = {(lbl or "").strip().lower() for lbl in (labels or [])}
+    if "bug" in low:
+        return "bug"
+    if "enhancement" in low:
+        return "feature"
+    return "generic"
 
 
 def labels_for(kind: str, extra: list[str] | None = None) -> list[str]:
@@ -268,6 +299,7 @@ def _parse(rest: str, *, default_repo: str = "") -> IssueRequest | str:
         i += 1
 
     title = " ".join(title_parts).strip()
+    kind = infer_kind(kind, labels)  # `--label bug` demands the repro section, like CI
     labels = labels_for(kind, labels)
     explicit_repo = repo
     repo = resolve_repo(repo, default_repo)

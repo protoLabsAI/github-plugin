@@ -16,6 +16,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from ghplugin import register
 
+_GATE_OK_BODY = (
+    "## Problem\nThe widget crashes on empty input and we should handle it gracefully "
+    "throughout the pipeline instead of raising.\n## Acceptance\nNo crash on empty input."
+)
+
 # Minimal valid args per tool — enough to get PAST the arg validation and into the
 # `run_gh` result handling, which is what the sweep is about. Any tool not listed
 # here is invoked with `{}` (its defaults), and the sweep fails loudly if a NEW tool
@@ -32,8 +37,12 @@ _ARGS: dict[str, dict] = {
     "github_read_file": {"repo": "o/n", "path": "README.md"},
     "github_read_pr_file": {"repo": "o/n", "number": 1, "path": "x"},
     "github_repo_contents": {"repo": "o/n", "path": "src"},
+    "github_list_prs": {"repo": "o/n"},
+    "github_issue_comments": {"repo": "o/n", "number": 1},
+    "github_search_issues": {"repo": "o/n", "query": "crash"},
     "github_status": {},
-    "github_create_issue": {"repo": "o/n", "title": "t"},
+    # create_issue is body-GATED (v0.7.0) — a gate-passing body so the sweep reaches gh.
+    "github_create_issue": {"repo": "o/n", "title": "t", "body": _GATE_OK_BODY},
     "github_comment": {"repo": "o/n", "number": 1, "body": "b"},
     "github_create_pr": {"repo": "o/n", "head": "h", "title": "t"},
     "github_edit_pr": {"repo": "o/n", "number": 1, "title": "t", "state": "ready"},
@@ -56,6 +65,25 @@ _SHAPES = {
     ),
     "list": (0, json.dumps([{"type": "file", "name": "x", "path": "x", "size": 1}, "not-a-dict", 7]), ""),
     "list-of-nulls": (0, "[null, null]", ""),
+    # every nested field a tool reads is a SCALAR — dicts()/parse_json must be total
+    "nested-scalars": (
+        0,
+        json.dumps(
+            {
+                "files": 7,
+                "labels": 1,
+                "statusCheckRollup": 42,
+                "reviews": 42,
+                "latestReviews": 0,
+                "comments": 42,
+                "author": 3,
+                "head": 5,
+                "hosts": 1,
+                "check_runs": 2,
+            }
+        ),
+        "",
+    ),
     "empty": (0, "", ""),
     "garbage": (0, "<<<not json>>> \x00\xff", ""),
     "number": (0, "42", ""),

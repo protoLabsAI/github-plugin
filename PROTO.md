@@ -40,7 +40,7 @@ gh_cli.py                # vendored async `gh` runner: binary resolution (PATH +
                          #   injection (config secret > env), check_gh_error CLASSIFICATION, bad_repo
 status.py                # the first-run probe: compute_status / summarize_status / report_gaps (setup-gap seam)
 projects.py              # repo sources: host projects: registry (ADR 0095) + checkout `origin` remote parsing
-read_tools.py            # 12 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + github_status)
+read_tools.py            # 15 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + status + list_prs/comments/search)
 write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
@@ -88,7 +88,7 @@ data routes, the `token` secret — reads through them per call. Never capture a
 value at register time: an `onboard_project` mid-session, or a token pasted in
 Settings, must be seen by the very next call.
 
-## 5. Tools (all implemented — 12 read / 8 write / 3 review = 23)
+## 5. Tools (all implemented — 15 read / 8 write / 3 review = 26)
 
 Each tool mocks `run_gh` in its test and asserts the exact argv + readable errors.
 `tests/test_no_raise_sweep.py` additionally invokes EVERY registered tool against a
@@ -102,10 +102,30 @@ sweep covers it automatically (it enumerates `register()`'s output).
 — a file at a PR's head; `github_repo_contents` — directory listing, says "is a file —
 use github_read_file" on a file; `github_path_exists` — the EXISTS/MISSING probe), and
 `github_status` — is `gh` installed / authenticated / as whom / which default repo, the
-self-diagnosis tool the model calls when another tool errors (no `write` gate).
+self-diagnosis tool the model calls when another tool errors (no `write` gate), and the
+PM verbs (v0.7.0): `github_list_prs` (reuses `api.fetch_prs`, so the tool and the board
+can't disagree — draft / review decision / merge state per row), `github_issue_comments`
+(`gh issue view --json comments`; works on PRs; newest `limit` in chronological order,
+bodies ≤ 1000 chars), `github_search_issues` (`gh search issues --repo … -- <query>`: flags first, the query
+LAST after `--` so a leading qualifier like `-label:bug` isn't read as a flag; `state:
+all` = no `--state` flag, gh only knows open|closed — documented as "dedupe before
+filing").
+`github_get_pr` carries the merge-readiness picture: `reviewDecision`, `mergeable`,
+`mergeStateStatus`, `statusCheckRollup` summarised (N pass / fail / pending + the
+failing names — both the CheckRun and StatusContext shapes), `latestReviews` (ONE per
+reviewer, their most recent — so bot COMMENTED reviews can't bury a human's
+CHANGES_REQUESTED; older gh falls back to the NEWEST `reviews`), `isDraft`; total output
+bounded at 12k chars (`github_issue_comments` too).
 
 **Write (gated on `github.write`)** —
-`github_create_issue` / `github_comment` / `github_create_pr` (return the new URL),
+`github_create_issue` (**body-gated**: the SAME `missing_sections` gate the `/issue`
+command enforces — a thin body, or a `bug` without repro / a `feature` without a
+direction-or-acceptance section, is refused with the scaffold and never posted; `kind`
+also adds the type label via `labels_for`, and a `generic` call whose labels carry
+`bug` / `enhancement` is gated as that kind because protoAgent's CI issue gate keys on
+the label. The section regexes are in LOCKSTEP with `.github/workflows/issue-gate.yml`
+in protoAgent — change both, `test_section_regexes_match_protoagents_ci_gate` pins a
+sample per alternative) / `github_comment` / `github_create_pr` (return the new URL),
 `github_edit_pr` (`gh pr edit` + `gh pr ready [--undo]`),
 `github_merge_pr` (`gh pr merge` — **refuses without `confirm=true`**, offers `dry_run`),
 `github_close` (close/reopen issue|pr), and `github_set_labels` / `github_set_assignees`
