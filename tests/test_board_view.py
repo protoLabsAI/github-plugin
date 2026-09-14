@@ -43,7 +43,17 @@ async def test_fetch_issues_bad_repo_and_bad_state():
     with patch("ghplugin.api.run_gh", fake):
         assert "owner/name" in (await fetch_issues("nope"))["error"]
         assert "state must be" in (await fetch_issues("o/n", state="weird"))["error"]
+        # "merged" is a PR state; `gh issue list --state merged` would fail with a bare gh error
+        assert "state must be" in (await fetch_issues("o/n", state="merged"))["error"]
     fake.assert_not_called()
+
+
+async def test_fetch_prs_still_accepts_merged():
+    fake = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.api.run_gh", fake):
+        assert await fetch_prs("o/n", state="merged") == {"items": []}
+    args = fake.call_args.args[0]
+    assert args[args.index("--state") + 1] == "merged"
 
 
 async def test_fetch_issues_gh_failure():
