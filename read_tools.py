@@ -36,6 +36,111 @@ _MAX_PR_CHARS = 12000  # github_get_pr's total output bound
 _MAX_REVIEWS = 10
 _MAX_COMMENT_CHARS = 1000
 
+# github_read_file / github_read_pr_file: the per-call bound on the FILE CONTENT (the
+# marker line and read_pr_file's header ride on top). The docstrings state it as a plain
+# literal (an f-string docstring ships no description) — a test pins that they agree.
+_MAX_FILE_CHARS = 20000
+
+
+def _bad_line_range(start_line: int, end_line: int) -> str | None:
+    """The error for an unusable 1-based inclusive line range, or None. Checked BEFORE any
+    `gh` call, so a bad range never spends a network round trip."""
+    if start_line < 1:
+        return f"Error: start_line must be >= 1 (lines are 1-based); got {start_line}."
+    if end_line < 0:
+        return f"Error: end_line must be >= start_line, or 0 for 'to the end of the file'; got {end_line}."
+    if end_line and end_line < start_line:
+        return (
+            f"Error: end_line ({end_line}) is before start_line ({start_line}) — "
+            "pass end_line >= start_line, or 0 to read to the end of the file."
+        )
+    return None
+
+
+def _split_lines(text: str) -> list[str]:
+    """Split on \\n ONLY, keeping each line's ending, so ``"".join(lines) == text``.
+    (``str.splitlines`` also breaks on \\r, \\f, \\u2028 … and would disagree with every
+    editor's and GitHub's line numbers.)"""
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _render_file(
+    text: str, start_line: int = 1, end_line: int = 0, *, path: str = "", cap: int = _MAX_FILE_CHARS
+) -> tuple[bool, str]:
+    """Slice a file's raw content to a line range and bound it — ``(ok, output)``.
+
+    A whole-file read that fits the cap comes back UNCHANGED (byte-identical, no
+    marker). Anything else — a requested range, or a read over the cap — ends with ONE
+    marker line (issue #31), always naming the file's total line count:
+
+    - ``… [truncated: showed lines A-B of N (20000-char cap); continue with start_line=B+1]``
+      — the cut is at a LINE boundary, never mid-line, so no reader mistakes it for
+      broken code; the shown text (minus the newline before the marker) is within the
+      cap, the same rule as the unchanged whole-file read. ``, end_line=E`` is added when
+      the caller's own end_line is still ahead.
+    - ``… [truncated mid-line: line A of N alone is L chars (20000-char cap), showed its
+      first 20000; continue with start_line=A+1]`` — the one exception: a single line
+      longer than the whole cap (minified code) can't be shown whole.
+    - ``… [showed lines A-B of N; continue with start_line=B+1]`` or
+      ``… [showed lines A-B of N; end of file]`` — a range returned in full.
+
+    ``ok`` is False (with an ``Error: …`` message) for a bad range or a start_line past
+    the end of the file.
+    """
+    if err := _bad_line_range(start_line, end_line):
+        return False, err
+    ranged = start_line != 1 or end_line != 0
+    if not ranged and len(text) <= cap:
+        return True, text
+    lines = _split_lines(text)
+    total = len(lines)
+    if start_line > total:
+        return (
+            False,
+            f"Error: start_line={start_line} is past the end of {path or 'the file'} — it has {total} line(s).",
+        )
+    last = min(end_line, total) if end_line else total  # the last line the caller asked for
+
+    def tail(shown_to: int) -> str:
+        if shown_to >= total:
+            return "end of file"
+        more = f"continue with start_line={shown_to + 1}"
+        if shown_to < last < total:  # cut INSIDE a range that stops short of EOF: keep its end
+            more += f", end_line={last}"
+        return more
+
+    shown: list[str] = []
+    size = 0
+    for line in lines[start_line - 1 : last]:
+        # A line's own newline doesn't count against the cap: it is the separator before
+        # the marker (or the end of the shown text), not content.
+        if size + len(line.removesuffix("\n")) > cap:
+            break
+        shown.append(line)
+        size += len(line)
+    if not shown:  # the first requested line alone is over the cap — the only mid-line cut
+        first = lines[start_line - 1].removesuffix("\n")
+        body = first[:cap]
+        marker = (
+            f"… [truncated mid-line: line {start_line} of {total} alone is {len(first)} chars "
+            f"({cap}-char cap), showed its first {cap}; {tail(start_line)}]"
+        )
+    else:
+        body = "".join(shown)
+        shown_to = start_line + len(shown) - 1
+        if shown_to < last:
+            marker = (
+                f"… [truncated: showed lines {start_line}-{shown_to} of {total} ({cap}-char cap); {tail(shown_to)}]"
+            )
+        else:
+            marker = f"… [showed lines {start_line}-{shown_to} of {total}; {tail(shown_to)}]"
+    return True, body + ("" if body.endswith("\n") else "\n") + marker
+
+
 # statusCheckRollup carries two shapes (verified against gh 2.92): a CheckRun
 # {name, status: COMPLETED|IN_PROGRESS|QUEUED|…, conclusion: SUCCESS|FAILURE|SKIPPED|
 # CANCELLED|NEUTRAL|TIMED_OUT|ACTION_REQUIRED|""} and a StatusContext {context,
@@ -366,17 +471,28 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
     # ── Repo-content readers — what lets an agent research ANY repo over `gh` without
     # registering an fs project per repo. ───────────────────────────────────────────
     @tool
-    async def github_read_file(path: str, repo: str = "", ref: str = "") -> str:
-        """Read a single file's raw contents from a GitHub repo (capped at 20000 chars).
+    async def github_read_file(path: str, repo: str = "", ref: str = "", start_line: int = 1, end_line: int = 0) -> str:
+        """Read a file's raw contents from a GitHub repo — the whole file or a line range.
+
+        Output is capped at 20000 chars per call. A longer read is cut at a LINE boundary
+        (never mid-line; the file is NOT broken there) and ends with a marker such as
+        ``… [truncated: showed lines 1-540 of 870 (20000-char cap); continue with start_line=541]``.
+        A ranged read ends with ``… [showed lines A-B of N; …]``. Page a large file with
+        ``start_line``/``end_line`` — don't guess at the rest or read another version instead.
 
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             path: Path to the file within the repo (e.g. ``docs/guide.md``). For a directory
                 use ``github_repo_contents``; for a file as it is IN a PR use ``github_read_pr_file``.
             ref: Optional branch / tag / SHA (default: the repo's default branch).
+            start_line: First line to return, 1-based (default 1).
+            end_line: Last line to return, inclusive; 0 (default) = to the end of the file
+                (still subject to the 20000-char cap).
         """
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
+            return err
+        if err := _bad_line_range(start_line, end_line):
             return err
         # `--method GET` is load-bearing: `gh api` switches to POST as soon as a `-f` field is
         # added, and POST /contents/{path} is a 404 on GitHub — every ref-pinned read failed
@@ -394,12 +510,13 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err
-        if len(out) > 20000:
-            out = out[:20000] + "\n… (truncated at 20000 chars)"
-        return out
+        # The contents API always returns the WHOLE file; the range is sliced here.
+        return _render_file(out, start_line, end_line, path=path)[1]
 
     @tool
-    async def github_read_pr_file(number: int, path: str, repo: str = "") -> str:
+    async def github_read_pr_file(
+        number: int, path: str, repo: str = "", start_line: int = 1, end_line: int = 0
+    ) -> str:
         """Read a file as it exists IN a pull request — at the PR's head commit.
 
         Use this for every code-context read while reviewing a PR. Unlike
@@ -407,13 +524,24 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         server-side from the PR number, so the file you get is the PR's version,
         including anything the PR adds.
 
+        Output is capped at 20000 chars per call. A longer read is cut at a LINE boundary
+        (never mid-line; the file is NOT broken there) and ends with a marker such as
+        ``… [truncated: showed lines 1-540 of 870 (20000-char cap); continue with start_line=541]``.
+        A ranged read ends with ``… [showed lines A-B of N; …]``. Page a large file with
+        ``start_line``/``end_line`` — don't guess at the rest or read the base version instead.
+
         Args:
             number: PR number.
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             path: Path to the file within the repo (e.g. ``src/lib/queries.ts``).
+            start_line: First line to return, 1-based (default 1).
+            end_line: Last line to return, inclusive; 0 (default) = to the end of the file
+                (still subject to the 20000-char cap).
         """
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
+            return err
+        if err := _bad_line_range(start_line, end_line):
             return err
         # The ref is resolved HERE, from the PR — never supplied by the caller. A
         # model that omits (or mistypes) a ref on a plain read silently gets the
@@ -441,8 +569,9 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
             # Fail LOUD, never fall back to the default branch: a silent fallback is
             # exactly the bug this tool exists to prevent.
             return f"Error reading {path} at {repo}#{number} head {head[:12]}: {gh_err}"
-        if len(out) > 20000:
-            out = out[:20000] + "\n… (truncated at 20000 chars)"
+        ok, out = _render_file(out, start_line, end_line, path=f"{path} at {repo}#{number} head {head[:12]}")
+        if not ok:  # a start_line past EOF — the error alone, no content header over it
+            return out
         return f"{path} @ {repo}#{number} head {head[:12]}:\n\n{out}"
 
     @tool

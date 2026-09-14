@@ -117,6 +117,21 @@ reviewer, their most recent — so bot COMMENTED reviews can't bury a human's
 CHANGES_REQUESTED; older gh falls back to the NEWEST `reviews`), `isDraft`; total output
 bounded at 12k chars (`github_issue_comments` too).
 
+**File reads page by line (#31).** `github_read_file` and `github_read_pr_file` take
+`start_line` (1-based, default 1) and `end_line` (inclusive; 0 = to the end), sliced
+locally from the whole file the contents API returns (`--method GET`, the ref as a
+query param — the range never reaches GitHub). The content is capped at 20000 chars
+(`_MAX_FILE_CHARS`; the docstrings repeat the literal and a test pins they agree). The
+DEFAULT read of a file that fits is returned byte-identical; anything else ends with ONE
+footer line (`read_tools._render_file`), always naming the total line count:
+`… [truncated: showed lines 1-540 of 870 (20000-char cap); continue with start_line=541]`
+(cut at a LINE boundary, never mid-line; `, end_line=E` added when the caller's range is
+still ahead), `… [showed lines A-B of N; continue with start_line=B+1]` /
+`… [showed lines A-B of N; end of file]` (a range returned in full), and — the one
+mid-line exception — `… [truncated mid-line: line A of N alone is L chars (20000-char
+cap), showed its first 20000; continue with start_line=A+1]`. A bad range or a
+`start_line` past EOF is an `Error: …` string, checked before any `gh` call where it can be.
+
 **Write (gated on `github.write`)** —
 `github_create_issue` (**body-gated**: the SAME `missing_sections` gate the `/issue`
 command enforces — a thin body, or a `bug` without repro / a `feature` without a
