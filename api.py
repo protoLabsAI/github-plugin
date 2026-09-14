@@ -37,10 +37,14 @@ def gh_available() -> bool:
     return resolve_gh() is not None
 
 
-def _norm_state(state: str) -> str | None:
+_PR_STATES = ("open", "closed", "merged", "all")
+_ISSUE_STATES = ("open", "closed", "all")  # issues have no "merged" — `gh issue list --state merged` errors
+
+
+def _norm_state(state: str, allowed: tuple[str, ...] = _PR_STATES) -> str | None:
     """Normalise the state filter to what `gh` accepts, or None if invalid."""
     s = (state or "open").strip().lower()
-    return s if s in ("open", "closed", "merged", "all") else None
+    return s if s in allowed else None
 
 
 async def fetch_issues(repo: str, state: str = "open", limit: int = 30) -> dict:
@@ -51,7 +55,7 @@ async def fetch_issues(repo: str, state: str = "open", limit: int = 30) -> dict:
     """
     if err := bad_repo(repo):
         return {"error": err}
-    norm = _norm_state(state)
+    norm = _norm_state(state, _ISSUE_STATES)
     if norm is None:
         return {"error": f"Error: state must be open|closed|all (got {state!r})."}
     capped = max(1, min(int(limit), 100))
