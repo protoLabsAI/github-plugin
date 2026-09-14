@@ -15,8 +15,10 @@ mergeability, a checks summary with the failing check names, the reviews),
 `github_list_prs` (the PR board: draft / review decision / merge state per row),
 `github_get_issue`, `github_list_issues`, `github_issue_comments` (the thread on an
 issue or PR), `github_search_issues` (dedupe **before** filing), `github_get_commit_diff`,
-`github_pr_diff`, `github_ci_runs`, `github_run_failure`, `github_read_file`,
-`github_read_pr_file`, `github_repo_contents`, `github_path_exists`, and `github_status`
+`github_pr_diff`, `github_ci_runs`, `github_run_failure`, `github_read_file` /
+`github_read_pr_file` (20000 chars per call, cut at a line boundary with a
+`continue with start_line=N` marker; page large files with `start_line`/`end_line`),
+`github_repo_contents`, `github_path_exists`, and `github_status`
 (is `gh` installed / signed in, as whom, which default repo — the self-diagnosis probe
 the model calls when another tool errors).
 

@@ -7,10 +7,12 @@ real `gh`/network is touched. The tools are langchain ``@tool``; invoke via ``ai
 from __future__ import annotations
 
 import json
+import random
+import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from ghplugin.read_tools import get_read_tools
+from ghplugin.read_tools import _MAX_FILE_CHARS, _render_file, _split_lines, get_read_tools
 
 
 def _read_file_tool():
@@ -71,10 +73,12 @@ async def test_gh_error_is_surfaced():
 
 @pytest.mark.asyncio
 async def test_long_content_is_truncated():
+    # One 25000-char line (no newline to cut at): the lone mid-line cut, and it says so.
     with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, "x" * 25000, ""))):
         result = await _read_file_tool().ainvoke({"repo": "owner/name", "path": "big.txt"})
-    assert result.endswith("… (truncated at 20000 chars)")
-    assert len(result) == 20000 + len("\n… (truncated at 20000 chars)")
+    assert result == "x" * 20000 + (
+        "\n… [truncated mid-line: line 1 of 1 alone is 25000 chars (20000-char cap), showed its first 20000; end of file]"
+    )
 
 
 @pytest.mark.asyncio
@@ -835,6 +839,18 @@ _REF = "0123456789abcdef0123456789abcdef01234567"
         ("github_repo_contents", {"repo": "o/n", "path": "src", "ref": "main"}, [(0, "[]", "")]),
         # read_pr_file: resolve the head SHA, then read the file AT that SHA.
         ("github_read_pr_file", {"repo": "o/n", "number": 7, "path": "src/a.py"}, [(0, _REF, ""), (0, "body", "")]),
+        # #31: a ranged read is still the same GET with the same ref — the range is sliced
+        # locally from the whole file, never sent to GitHub.
+        (
+            "github_read_file",
+            {"repo": "o/n", "path": "src/a.py", "ref": _REF, "start_line": 1, "end_line": 1},
+            [(0, "body", "")],
+        ),
+        (
+            "github_read_pr_file",
+            {"repo": "o/n", "number": 7, "path": "src/a.py", "start_line": 1, "end_line": 1},
+            [(0, _REF, ""), (0, "body", "")],
+        ),
     ],
 )
 async def test_ref_pinned_contents_reads_are_GETs(name, args, gh_replies):
@@ -848,6 +864,7 @@ async def test_ref_pinned_contents_reads_are_GETs(name, args, gh_replies):
         # …and the ref still travels (as a query parameter on the GET).
         want = args.get("ref") or _REF
         assert f"ref={want}" in argv, argv
+        assert not any("start_line" in a or "end_line" in a for a in argv), argv
 
 
 @pytest.mark.asyncio
@@ -857,3 +874,242 @@ async def test_read_pr_file_reads_at_the_resolved_head():
         out = await _tool("github_read_pr_file").ainvoke({"repo": "o/n", "number": 7, "path": "src/a.py"})
     assert out.startswith(f"src/a.py @ o/n#7 head {_REF[:12]}:")
     assert "print('hi')" in out
+
+
+# ── Ranged reads + an honest truncation marker (#31) ─────────────────────────────
+# On large files the review panel's lanes burned their turn budget working around a
+# blind 20000-char cut (`find_removed_behavior` ran 974 s on protoAgent#3521 and never
+# reported), and the structural lane posted "truncated mid-statement at line 539 →
+# SyntaxError" as a blocker three rounds running on an intact file. The contract: the
+# default whole-file read that fits is byte-identical; anything else is cut at a LINE
+# boundary and ends with ONE marker line naming the total line count and how to go on.
+
+_W = 40  # every synthetic line is _W chars + "\n" = 41 → 487 whole lines fit in 20000
+
+
+def _numbered(n: int) -> str:
+    """n fixed-width lines ("L00001....."), no trailing newline (run_gh strips stdout)."""
+    return "\n".join(f"L{i:05d}".ljust(_W, ".") for i in range(1, n + 1))
+
+
+_BIG = _numbered(870)  # the size of graph/snapshot_op.py in the issue
+_BIG_LINES = _BIG.split("\n")
+_PR_HEADER = f"big.py @ o/n#7 head {_REF[:12]}:\n\n"
+
+
+def _lines(a: int, b: int) -> str:
+    return "\n".join(_BIG_LINES[a - 1 : b])
+
+
+async def _read(content: str, **kw) -> str:
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, content, ""))):
+        return await _tool("github_read_file").ainvoke({"repo": "o/n", "path": "big.py", **kw})
+
+
+async def _read_pr(content: str, **kw) -> str:
+    mock = AsyncMock(side_effect=[(0, _REF, ""), (0, content, "")])
+    with patch("ghplugin.read_tools.run_gh", mock):
+        return await _tool("github_read_pr_file").ainvoke({"repo": "o/n", "number": 7, "path": "big.py", **kw})
+
+
+def test_the_synthetic_file_math_the_tests_lean_on():
+    assert len(_BIG_LINES) == 870 and all(len(line) == _W for line in _BIG_LINES)
+    assert 487 * (_W + 1) - 1 <= _MAX_FILE_CHARS < 488 * (_W + 1) - 1
+    assert len(_BIG) > _MAX_FILE_CHARS
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "x", "a\nb", "a\r\nb\r\n", "line\n\n\nend", "ünïcødé ✓\n", "y" * _MAX_FILE_CHARS, _numbered(487)],
+)
+async def test_a_whole_file_that_fits_is_byte_identical(content):
+    assert await _read(content) == content
+    assert await _read_pr(content) == _PR_HEADER + content
+
+
+async def test_an_explicit_range_on_a_small_file_gets_the_marker():
+    # Only the DEFAULT read is byte-identical; asking for a range always says what it got.
+    assert await _read("a\nb\nc", start_line=1, end_line=3) == "a\nb\nc\n… [showed lines 1-3 of 3; end of file]"
+
+
+async def test_over_the_cap_is_cut_at_a_line_boundary_with_a_continue_marker():
+    out = await _read(_BIG)
+    body, marker = out.rsplit("\n", 1)
+    assert marker == "… [truncated: showed lines 1-487 of 870 (20000-char cap); continue with start_line=488]"
+    assert body == _lines(1, 487)  # whole lines only — line 487 intact, nothing of 488
+    assert len(body) <= _MAX_FILE_CHARS
+    pr = await _read_pr(_BIG)
+    assert pr == _PR_HEADER + out
+
+
+async def test_one_char_over_the_cap_is_truncated_and_exactly_at_it_is_not():
+    at_cap = _numbered(487) + "\n" + "z" * 33
+    assert len(at_cap) == _MAX_FILE_CHARS
+    assert await _read(at_cap) == at_cap
+    over = at_cap + "z"
+    assert await _read(over) == (
+        _numbered(487) + "\n… [truncated: showed lines 1-487 of 488 (20000-char cap); continue with start_line=488]"
+    )
+
+
+async def test_following_the_marker_pages_through_the_whole_file():
+    pages, start = [], 1
+    for _ in range(10):
+        out = await _read(_BIG, start_line=start)
+        body, marker = out.rsplit("\n", 1)
+        pages.append(body)
+        m = re.search(r"continue with start_line=(\d+)\]$", marker)
+        if not m:
+            assert marker == "… [showed lines 488-870 of 870; end of file]", marker
+            break
+        start = int(m.group(1))
+    assert "\n".join(pages) == _BIG
+    assert len(pages) == 2
+
+
+@pytest.mark.parametrize(
+    ("kw", "a", "b", "tail"),
+    [
+        ({"start_line": 1, "end_line": 10}, 1, 10, "continue with start_line=11"),  # first
+        ({"start_line": 100, "end_line": 200}, 100, 200, "continue with start_line=201"),  # middle
+        ({"start_line": 861, "end_line": 870}, 861, 870, "end of file"),  # last
+        ({"start_line": 860, "end_line": 5000}, 860, 870, "end of file"),  # end_line past EOF clamps
+        ({"start_line": 541}, 541, 870, "end of file"),  # end_line=0 → to the end
+        ({"start_line": 5, "end_line": 5}, 5, 5, "continue with start_line=6"),  # one line
+    ],
+)
+async def test_a_range_that_fits_returns_exactly_those_lines(kw, a, b, tail):
+    out = await _read(_BIG, **kw)
+    assert out == _lines(a, b) + f"\n… [showed lines {a}-{b} of 870; {tail}]"
+    assert await _read_pr(_BIG, **kw) == _PR_HEADER + out
+
+
+async def test_a_cut_inside_a_requested_range_keeps_its_end_line():
+    out = await _read(_BIG, start_line=1, end_line=800)
+    assert out == _lines(1, 487) + (
+        "\n… [truncated: showed lines 1-487 of 870 (20000-char cap); continue with start_line=488, end_line=800]"
+    )
+    assert await _read(_BIG, start_line=488, end_line=800) == (
+        _lines(488, 800) + "\n… [showed lines 488-800 of 870; continue with start_line=801]"
+    )
+    # an end_line at/past EOF is "to the end" — nothing to carry forward
+    assert (await _read(_BIG, start_line=1, end_line=5000)).endswith("; continue with start_line=488]")
+
+
+async def test_start_line_past_eof_is_a_clear_error():
+    assert await _read(_BIG, start_line=871) == "Error: start_line=871 is past the end of big.py — it has 870 line(s)."
+    assert await _read_pr(_BIG, start_line=871, end_line=900) == (
+        f"Error: start_line=871 is past the end of big.py at o/n#7 head {_REF[:12]} — it has 870 line(s)."
+    )
+    assert (
+        await _read("", start_line=1, end_line=5) == "Error: start_line=1 is past the end of big.py — it has 0 line(s)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("kw", "msg"),
+    [
+        ({"start_line": 0}, "Error: start_line must be >= 1 (lines are 1-based); got 0."),
+        ({"start_line": -5}, "Error: start_line must be >= 1 (lines are 1-based); got -5."),
+        ({"end_line": -1}, "Error: end_line must be >= start_line, or 0 for 'to the end of the file'; got -1."),
+        (
+            {"start_line": 10, "end_line": 5},
+            "Error: end_line (5) is before start_line (10) — pass end_line >= start_line, or 0 to read to the end of the file.",
+        ),
+    ],
+)
+@pytest.mark.parametrize("name", ["github_read_file", "github_read_pr_file"])
+async def test_a_bad_range_is_an_error_string_before_any_gh_call(name, kw, msg):
+    mock = AsyncMock(return_value=(0, _REF, ""))
+    args = {"repo": "o/n", "path": "big.py", **kw}
+    if name == "github_read_pr_file":
+        args["number"] = 7
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _tool(name).ainvoke(args)
+    assert out == msg
+    mock.assert_not_called()
+
+
+async def test_a_line_longer_than_the_cap_is_the_only_mid_line_cut_and_says_so():
+    content = "m" * 25000 + "\nnext line\nlast"
+    assert await _read(content) == "m" * 20000 + (
+        "\n… [truncated mid-line: line 1 of 3 alone is 25000 chars (20000-char cap), showed its first 20000; "
+        "continue with start_line=2]"
+    )
+    # …and paging past it still works (no loop on the oversize line).
+    assert await _read(content, start_line=2) == "next line\nlast\n… [showed lines 2-3 of 3; end of file]"
+
+
+@pytest.mark.parametrize("name", ["github_read_file", "github_read_pr_file"])
+def test_descriptions_state_the_cap_the_marker_and_how_to_page(name):
+    t = _tool(name)
+    desc = t.description
+    assert f"capped at {_MAX_FILE_CHARS} chars" in desc  # the plain-literal docstring agrees with the constant
+    assert "LINE boundary" in desc and "continue with start_line=" in desc
+    assert "start_line" in desc and "end_line" in desc
+    assert t.args["start_line"].get("default") == 1
+    assert t.args["end_line"].get("default") == 0
+
+
+# The rendered output, parsed back: `showed lines A-B of N` (optionally `truncated:` +
+# the cap), then either the next start_line (+ the caller's end_line) or `end of file`.
+_MARKER_RE = re.compile(
+    r"… \[(truncated: )?showed lines (\d+)-(\d+) of (\d+)(?: \((\d+)-char cap\))?; "
+    r"(?:continue with start_line=(\d+)(?:, end_line=(\d+))?|end of file)\]"
+)
+_MIDLINE_RE = re.compile(
+    r"… \[truncated mid-line: line (\d+) of (\d+) alone is (\d+) chars \((\d+)-char cap\), "
+    r"showed its first (\d+); (?:continue with start_line=(\d+)(?:, end_line=\d+)?|end of file)\]"
+)
+
+
+def test_render_invariants_over_random_files():
+    """Random files (empty lines, CRLF, trailing newline or not, lines over the cap) ×
+    random caps and ranges: the marker's numbers are always the truth about the output."""
+    rng = random.Random(31)
+    for _ in range(3000):
+        lines = []
+        for _ in range(rng.randint(0, 40)):
+            roll = rng.random()
+            n = 0 if roll < 0.15 else rng.randint(1, 30) if roll < 0.92 else rng.randint(60, 200)
+            lines.append("".join(rng.choice("ab (){}:") for _ in range(n)))
+        eol = rng.choice(["\n", "\r\n"])
+        text = eol.join(lines) + (eol if rng.random() < 0.3 else "")
+        cap = rng.randint(20, 150)
+        all_lines = _split_lines(text)
+        assert "".join(all_lines) == text
+        total = len(all_lines)
+        start = rng.randint(1, total + 2)
+        end = rng.choice([0, 0, rng.randint(start, start + 30)])
+        ok, out = _render_file(text, start, end, cap=cap)
+        if start == 1 and end == 0 and len(text) <= cap:
+            assert ok and out == text
+            continue
+        if start > total:
+            assert not ok and out.startswith(f"Error: start_line={start} is past the end")
+            continue
+        assert ok
+        idx = out.rfind("\n")
+        shown, marker = out[:idx], out[idx + 1 :]
+        last = min(end, total) if end else total
+        if m := _MARKER_RE.fullmatch(marker):
+            a, b, tot = int(m[2]), int(m[3]), int(m[4])
+            assert (a, tot) == (start, total) and a <= b <= last, marker
+            want = "".join(all_lines[a - 1 : b])
+            assert shown == want.removesuffix("\n"), marker  # exactly those whole lines
+            assert len(shown) <= cap
+            truncated = m[1] is not None
+            assert truncated == (b < last) == (m[5] is not None), marker
+            if truncated:  # …and the next line really didn't fit
+                assert len(want) + len(all_lines[b].removesuffix("\n")) > cap
+            assert (m[6] is None) == (b >= total), marker
+            if m[6]:
+                assert int(m[6]) == b + 1
+            assert (m[7] is not None) == (truncated and last < total), marker
+        else:
+            m = _MIDLINE_RE.fullmatch(marker)
+            assert m, marker
+            line = all_lines[start - 1].removesuffix("\n")
+            assert (int(m[1]), int(m[2]), int(m[3])) == (start, total, len(line)) and len(line) > cap
+            assert shown == line[:cap]
+            assert (m[6] is None) == (start >= total)
