@@ -105,7 +105,7 @@ async def test_repo_contents_root_passes_no_trailing_slash():
     mock = AsyncMock(return_value=(0, _CONTENTS_JSON, ""))
     with patch("ghplugin.read_tools.run_gh", mock):
         await _repo_contents_tool().ainvoke({"repo": "owner/name"})
-    assert mock.call_args.args[0] == ["api", "repos/owner/name/contents"]
+    assert mock.call_args.args[0] == ["api", "--method", "GET", "repos/owner/name/contents"]
 
 
 @pytest.mark.asyncio
@@ -779,3 +779,81 @@ def test_search_issues_description_says_dedupe_before_filing():
             "github_create_issue"
         ].description
     )
+
+
+# ── Every contents read must be a GET (pr-reviewer-plugin#118) ───────────────────
+# `gh api` picks the HTTP method itself: "The default HTTP request method is GET
+# normally and POST if any parameters were added. Override the method with
+# --method" (`gh api --help`). Passing the ref as `-f ref=<x>` without `--method GET`
+# therefore sent `POST /repos/{o}/{r}/contents/{path}`, which GitHub answers with
+# 404 Not Found — on files that exist. In production that made EVERY ref-pinned
+# `github_read_file` and EVERY `github_read_pr_file` call fail (0 successes across
+# ~2 months of review-panel audit logs), so the panel's lanes reviewed diffs blind.
+# The old `"-f" in args` / `"ref=main" in args` assertions stayed green throughout:
+# they checked that the ref was PASSED, never how gh would SEND it.
+_FIELD_FLAGS = {"-f", "--raw-field", "-F", "--field", "--input"}
+
+
+def _gh_api_method(argv: list[str]) -> str:
+    """The HTTP method `gh api <argv>` sends, per gh's documented selection rule."""
+    for i, arg in enumerate(argv):
+        if arg in ("-X", "--method") and i + 1 < len(argv):
+            return argv[i + 1].upper()
+        if arg.startswith("--method="):
+            return arg.split("=", 1)[1].upper()
+        if arg.startswith("-X") and len(arg) > 2:
+            return arg[2:].upper()
+    has_fields = any(a in _FIELD_FLAGS or a.startswith(("--field=", "--raw-field=")) for a in argv)
+    return "POST" if has_fields else "GET"
+
+
+def test_gh_api_method_model_matches_gh_semantics():
+    # The rule the regression tests below lean on (checked against gh 2.92 --verbose).
+    assert _gh_api_method(["api", "repos/o/n/contents/x"]) == "GET"
+    assert _gh_api_method(["api", "repos/o/n/contents/x", "-f", "ref=main"]) == "POST"
+    assert _gh_api_method(["api", "--method", "GET", "repos/o/n/contents/x", "-f", "ref=main"]) == "GET"
+    assert _gh_api_method(["api", "repos/o/n/pulls/1/reviews", "-X", "POST", "-f", "body=x"]) == "POST"
+
+
+def _tool(name: str):
+    for t in get_read_tools():
+        if t.name == name:
+            return t
+    raise AssertionError(f"{name} tool not found")
+
+
+_REF = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "args", "gh_replies"),
+    [
+        ("github_read_file", {"repo": "o/n", "path": "src/a.py", "ref": _REF}, [(0, "body", "")]),
+        ("github_read_file", {"repo": "o/n", "path": "src/a.py", "ref": "epic/fleet-deck"}, [(0, "body", "")]),
+        ("github_path_exists", {"repo": "o/n", "path": "src/a.py", "ref": "main"}, [(0, "{}", "")]),
+        ("github_repo_contents", {"repo": "o/n", "path": "src", "ref": "main"}, [(0, "[]", "")]),
+        # read_pr_file: resolve the head SHA, then read the file AT that SHA.
+        ("github_read_pr_file", {"repo": "o/n", "number": 7, "path": "src/a.py"}, [(0, _REF, ""), (0, "body", "")]),
+    ],
+)
+async def test_ref_pinned_contents_reads_are_GETs(name, args, gh_replies):
+    mock = AsyncMock(side_effect=gh_replies)
+    with patch("ghplugin.read_tools.run_gh", mock):
+        await _tool(name).ainvoke(args)
+    contents_calls = [c.args[0] for c in mock.call_args_list if any("/contents" in a for a in c.args[0])]
+    assert contents_calls, "the tool never read the contents API"
+    for argv in contents_calls:
+        assert _gh_api_method(argv) == "GET", f"{name} sends {_gh_api_method(argv)} (404s on GitHub): {argv}"
+        # …and the ref still travels (as a query parameter on the GET).
+        want = args.get("ref") or _REF
+        assert f"ref={want}" in argv, argv
+
+
+@pytest.mark.asyncio
+async def test_read_pr_file_reads_at_the_resolved_head():
+    mock = AsyncMock(side_effect=[(0, _REF, ""), (0, "print('hi')", "")])
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _tool("github_read_pr_file").ainvoke({"repo": "o/n", "number": 7, "path": "src/a.py"})
+    assert out.startswith(f"src/a.py @ o/n#7 head {_REF[:12]}:")
+    assert "print('hi')" in out

@@ -378,7 +378,17 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
-        args = ["api", f"repos/{repo}/contents/{path}", "-H", "Accept: application/vnd.github.raw+json"]
+        # `--method GET` is load-bearing: `gh api` switches to POST as soon as a `-f` field is
+        # added, and POST /contents/{path} is a 404 on GitHub — every ref-pinned read failed
+        # (pr-reviewer-plugin#118). With GET, gh sends the fields as query params (?ref=…).
+        args = [
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repo}/contents/{path}",
+            "-H",
+            "Accept: application/vnd.github.raw+json",
+        ]
         if ref.strip():
             args += ["-f", f"ref={ref}"]
         rc, out, serr = await run_gh(args)
@@ -418,6 +428,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         rc, out, serr = await run_gh(
             [
                 "api",
+                "--method",
+                "GET",  # a `-f` field makes gh default to POST, a 404 here (#118)
                 f"repos/{repo}/contents/{path}",
                 "-H",
                 "Accept: application/vnd.github.raw+json",
@@ -456,7 +468,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         if not path.strip():
             return "Error: `path` is empty."
         clean = path.strip().strip("/")
-        args = ["api", f"repos/{repo}/contents/{clean}"]
+        args = ["api", "--method", "GET", f"repos/{repo}/contents/{clean}"]  # GET: see github_read_file
         if ref.strip():
             args += ["-f", f"ref={ref.strip()}"]
         rc, out, serr = await run_gh(args)
@@ -489,7 +501,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
-        args = ["api", f"repos/{repo}/contents/{path}" if path else f"repos/{repo}/contents"]
+        # GET explicitly — a `-f ref=` field would otherwise make gh send POST (see github_read_file).
+        args = ["api", "--method", "GET", f"repos/{repo}/contents/{path}" if path else f"repos/{repo}/contents"]
         if ref.strip():
             args += ["-f", f"ref={ref}"]
         rc, out, serr = await run_gh(args)
