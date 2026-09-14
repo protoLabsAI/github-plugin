@@ -1,0 +1,19 @@
+name: Release
+
+# Thin caller: delegates tag + GitHub Release (LLM-themed notes) + Discord notice to
+# the reusable plugin-release workflow in protoLabsAI/release-tools. Fires on a
+# `chore: release vX.Y.Z` commit landing on main, or manually via workflow_dispatch.
+# The reusable workflow is idempotent: a re-run on an existing tag skips gracefully.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  release:
+    if: >-
+      github.repository == 'protoLabsAI/github-plugin' &&
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'chore: release v'))
+    uses: protoLabsAI/release-tools/.github/workflows/plugin-release.yml@v2
+    secrets: inherit
