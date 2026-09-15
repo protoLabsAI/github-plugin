@@ -83,3 +83,5 @@ ruff check . && ruff format --check . && pytest -q
 ```
 
 Host-free — the suite needs no protoAgent host. See [PROTO.md](./PROTO.md).
+
+<!-- scratch check 2026-09-15T10:10:24Z: safe to close -->
