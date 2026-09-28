@@ -162,6 +162,10 @@ branched on `token_source()` (a rejected env/config token says "replace/unset it
 named when known); 403/429 + "rate limit" ⇒ `Error: GitHub API rate limit hit — retry …`;
 binary missing ⇒ `Error: gh CLI is not installed or not on PATH (looked in …)`. Anything
 else keeps the `Error (gh exit N): <stderr>` shape. Add a category here, not in a tool.
+The one tool-side refinement: a 404 from `github_read_file` / `github_read_pr_file` probes
+up to 4 parent directories at the same ref (`read_tools._missing_path_hint`). If one
+exists, the error says the PATH is wrong and lists that directory, so the model stops
+guessing sibling paths. If none exists, the classified 404 above stands.
 
 **First-run status** (`status.py`): `GET /api/plugins/github/status` → `{gh_path,
 gh_version, authenticated, login, host, token_source, error, default_repo, repos,
