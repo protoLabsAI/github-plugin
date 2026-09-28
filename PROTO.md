@@ -40,8 +40,8 @@ gh_cli.py                # vendored async `gh` runner: binary resolution (PATH +
                          #   injection (config secret > env), check_gh_error CLASSIFICATION, bad_repo
 status.py                # the first-run probe: compute_status / summarize_status / report_gaps (setup-gap seam)
 projects.py              # repo sources: host projects: registry (ADR 0095) + checkout `origin` remote parsing
-read_tools.py            # 15 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + status + list_prs/comments/search)
-write_tools.py           # 8 write tools (create/edit/merge/close/comment/labels/assignees) — gated
+read_tools.py            # 16 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + status + list_prs/comments/search + review_threads)
+write_tools.py           # 10 write tools (create/edit/merge/close/comment/labels/assignees + reply/resolve review threads) — gated
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
 api.py                   # routers — public PAGES (view/new-issue) + gated data routes (config/status/issues/prs/issue)

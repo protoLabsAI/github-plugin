@@ -33,6 +33,8 @@ the tool ships with no description).
 
 from __future__ import annotations
 
+import re
+
 from langchain_core.tools import tool
 
 from .gh_cli import bad_repo, check_gh_error, parse_json, run_gh
@@ -50,7 +52,7 @@ def _pr_number(url: str) -> str:
     return tail if tail.isdigit() else ""
 
 
-_THREAD_ID_RE = __import__("re").compile(r"^PRRT_[A-Za-z0-9_-]{6,}$")
+_THREAD_ID_RE = re.compile(r"^PRRT_[A-Za-z0-9_-]{6,}$")
 
 
 def _bad_thread_id(thread_id: str) -> str | None:
