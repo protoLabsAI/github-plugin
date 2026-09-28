@@ -10,11 +10,12 @@ read-only in-tree `github` plugin.
 
 ## Tools (all implemented)
 
-**Read** (always, 15): `github_get_pr` (the merge-readiness picture: review decision,
+**Read** (always, 16): `github_get_pr` (the merge-readiness picture: review decision,
 mergeability, a checks summary with the failing check names, the reviews),
 `github_list_prs` (the PR board: draft / review decision / merge state per row),
 `github_get_issue`, `github_list_issues`, `github_issue_comments` (the thread on an
-issue or PR), `github_search_issues` (dedupe **before** filing), `github_get_commit_diff`,
+issue or PR), `github_review_threads` (a PR's resolvable review threads with their
+`PRRT_…` ids — the unresolved ones keep a QA check from clearing), `github_search_issues` (dedupe **before** filing), `github_get_commit_diff`,
 `github_pr_diff`, `github_ci_runs`, `github_run_failure`, `github_read_file` /
 `github_read_pr_file` (20000 chars per call, cut at a line boundary with a
 `continue with start_line=N` marker; page large files with `start_line`/`end_line`),
@@ -22,17 +23,18 @@ issue or PR), `github_search_issues` (dedupe **before** filing), `github_get_com
 (is `gh` installed / signed in, as whom, which default repo — the self-diagnosis probe
 the model calls when another tool errors).
 
-**Write** (only when `github.write: true`, 8): `github_create_issue` (body-**gated** —
+**Write** (only when `github.write: true`, 10): `github_create_issue` (body-**gated** —
 the same Problem / repro / acceptance sections the `/issue` command requires; a thin
 body gets the scaffold back, never posted), `github_comment`, `github_create_pr`,
 `github_edit_pr`, `github_merge_pr` (`confirm`-guarded), `github_close`,
-`github_set_labels`, `github_set_assignees`.
+`github_set_labels`, `github_set_assignees`, `github_reply_thread` (answer a review
+thread in place, optionally resolving it) and `github_resolve_thread` (resolve / unresolve).
 
 **Review** (also behind `github.write`, 3): `github_review_comment`,
 `github_review_approve`, `github_review_request_changes` — the formal verdict tools,
 with the CI-terminal and self-review guards enforced inside the tool (ADR 0078).
 
-26 tools in all, every one covered by the no-raise sweep.
+29 tools in all, every one covered by the no-raise sweep.
 
 Plus the **user-only `/issue` chat command** (file an issue from the composer on any
 agent, without the model) and two console views — the read-only Issues/PRs **board**

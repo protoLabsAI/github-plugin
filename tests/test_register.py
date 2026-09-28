@@ -25,6 +25,7 @@ READ_TOOLS = {
     "github_status",  # the self-diagnosis probe — always on, no write gate (v0.6.0)
     "github_list_prs",  # the PM verbs (v0.7.0)
     "github_issue_comments",
+    "github_review_threads",  # list resolvable review threads (v0.9.0)
     "github_search_issues",
 }
 WRITE_TOOLS = {
@@ -36,6 +37,8 @@ WRITE_TOOLS = {
     "github_close",
     "github_set_labels",
     "github_set_assignees",
+    "github_reply_thread",
+    "github_resolve_thread",
 }
 
 
@@ -186,15 +189,15 @@ async def test_configured_default_repo_skips_the_picker_computation(make_registr
 
 
 def test_inventory_counts_match_the_docs(make_registry):
-    """README / PROTO.md say 15 read / 8 write / 3 review = 26. Recount from what
+    """README / PROTO.md say 16 read / 10 write / 3 review = 29. Recount from what
     register() actually produces so the docs can't drift from the code again."""
     reg = make_registry({"write": True})
     register(reg)
     names = set(reg.tool_names)
     review = {"github_review_comment", "github_review_approve", "github_review_request_changes"}
-    assert len(READ_TOOLS) == 15 and len(WRITE_TOOLS) == 8 and len(review) == 3
-    assert names == READ_TOOLS | WRITE_TOOLS | review and len(names) == 26
+    assert len(READ_TOOLS) == 16 and len(WRITE_TOOLS) == 10 and len(review) == 3
+    assert names == READ_TOOLS | WRITE_TOOLS | review and len(names) == 29
     root = Path(__file__).resolve().parent.parent
-    assert "15 read / 8 write / 3 review = 26" in (root / "PROTO.md").read_text(), "PROTO.md inventory stale"
+    assert "16 read / 10 write / 3 review = 29" in (root / "PROTO.md").read_text(), "PROTO.md inventory stale"
     readme = (root / "README.md").read_text()
-    assert "**Read** (always, 15)" in readme and "26 tools in all" in readme, "README inventory stale"
+    assert "**Read** (always, 16)" in readme and "29 tools in all" in readme, "README inventory stale"

@@ -18,6 +18,11 @@ The set:
   - github_close         — close/reopen an issue or PR (`gh {issue,pr} close|reopen`).
   - github_set_labels    — add/remove labels (`gh {issue,pr} edit --add/--remove-label`).
   - github_set_assignees — add/remove assignees (`gh {issue,pr} edit --add/--remove-assignee`).
+  - github_reply_thread  — reply INSIDE a PR review thread (GraphQL
+    addPullRequestReviewThreadReply), optionally resolving it in the same call.
+  - github_resolve_thread — resolve / unresolve a PR review thread (GraphQL
+    resolveReviewThread / unresolveReviewThread). Unresolved threads keep a PR's QA check
+    from clearing; ``github_review_threads`` lists them with their ids.
 
 Issue-vs-PR matters for close/labels/assignees (different `gh` subcommands), so those
 take a ``kind`` ("issue" | "pr"); commenting does not (a PR is an issue for comments).
@@ -30,7 +35,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from .gh_cli import bad_repo, check_gh_error, run_gh
+from .gh_cli import bad_repo, check_gh_error, parse_json, run_gh
 from .gh_issue import infer_kind, labels_for, missing_sections, resolve_repo, scaffold_for
 
 
@@ -43,6 +48,43 @@ def _pr_number(url: str) -> str:
     """The PR number from a ``…/pull/<n>`` URL, or "" when it isn't one."""
     tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
     return tail if tail.isdigit() else ""
+
+
+_THREAD_ID_RE = __import__("re").compile(r"^PRRT_[A-Za-z0-9_-]{6,}$")
+
+
+def _bad_thread_id(thread_id: str) -> str | None:
+    """A review-thread node id is ``PRRT_…`` — refuse anything else before ``gh`` runs
+    (a comment id or a PR number here is the common mistake)."""
+    if not _THREAD_ID_RE.match(str(thread_id or "").strip()):
+        return (
+            f"Error: {thread_id!r} is not a review-thread id (they look like PRRT_…). "
+            "List them with github_review_threads."
+        )
+    return None
+
+
+async def _thread_mutation(mutation: str, thread_id: str, body: str = "") -> tuple[dict | None, str | None]:
+    """Run one review-thread GraphQL mutation; returns (data, error string)."""
+    if body:
+        q = (
+            "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:"
+            "{pullRequestReviewThreadId:$id,body:$body}){comment{url}}}"
+        )
+        args = ["api", "graphql", "-f", f"query={q}", "-f", f"id={thread_id}", "-f", f"body={body}"]
+    else:
+        q = f"mutation($id:ID!){{{mutation}(input:{{threadId:$id}}){{thread{{id isResolved}}}}}}"
+        args = ["api", "graphql", "-f", f"query={q}", "-f", f"id={thread_id}"]
+    rc, out, serr = await run_gh(args)
+    if gh_err := check_gh_error(rc, serr):
+        return None, gh_err
+    d, perr = parse_json(out, dict)
+    if perr:
+        return None, perr
+    if d.get("errors"):
+        msg = "; ".join(str(e.get("message") or e) for e in d["errors"] if isinstance(e, dict)) or str(d["errors"])
+        return None, f"Error: GitHub refused the review-thread change: {msg}"
+    return d.get("data") or {}, None
 
 
 def get_write_tools(default_repo="", emit=None) -> list:
@@ -349,6 +391,59 @@ def get_write_tools(default_repo="", emit=None) -> list:
             return gh_err
         return out.strip() or f"Updated assignees on {kind} #{number} in {repo}."
 
+    @tool
+    async def github_reply_thread(thread_id: str, body: str, resolve: bool = False) -> str:
+        """Reply INSIDE a pull request review thread (an inline, resolvable conversation — a
+        CodeRabbit or reviewer line comment), optionally resolving it in the same call. Use it
+        after a fix round to answer each finding where it was raised — say what changed and
+        where — then resolve it; a PR-level ``github_comment`` does NOT answer or clear a
+        thread. Get thread ids from ``github_review_threads``.
+
+        Args:
+            thread_id: The review-thread id (``PRRT_…``) from ``github_review_threads``.
+            body: The reply (Markdown).
+            resolve: Also resolve the thread after replying (default False).
+
+        Returns the reply URL (and whether the thread is now resolved).
+        """
+        if err := _bad_thread_id(thread_id):
+            return err
+        if not (body or "").strip():
+            return "Error: body is empty — say what you changed (or why no change is needed)."
+        data, err = await _thread_mutation("", thread_id.strip(), body)
+        if err:
+            return err
+        url = (((data or {}).get("addPullRequestReviewThreadReply") or {}).get("comment") or {}).get("url") or ""
+        if not resolve:
+            return url or "Replied."
+        _, err = await _thread_mutation("resolveReviewThread", thread_id.strip())
+        if err:
+            return f"Replied ({url}), but resolving failed: {err}"
+        return f"Replied ({url}) and resolved the thread."
+
+    @tool
+    async def github_resolve_thread(thread_id: str, unresolve: bool = False) -> str:
+        """Resolve (or unresolve) a pull request review thread. Unresolved threads keep a PR's
+        QA check from clearing and so block auto-merge; resolve one only once its finding is
+        fixed or answered (prefer ``github_reply_thread`` with ``resolve=true`` so the answer
+        is on the thread). Get thread ids from ``github_review_threads``.
+
+        Args:
+            thread_id: The review-thread id (``PRRT_…``) from ``github_review_threads``.
+            unresolve: Re-open a resolved thread instead (default False).
+
+        Returns a short confirmation.
+        """
+        if err := _bad_thread_id(thread_id):
+            return err
+        mutation = "unresolveReviewThread" if unresolve else "resolveReviewThread"
+        data, err = await _thread_mutation(mutation, thread_id.strip())
+        if err:
+            return err
+        thread = ((data or {}).get(mutation) or {}).get("thread") or {}
+        state = "resolved" if thread.get("isResolved") else "unresolved"
+        return f"Thread {thread_id.strip()} is now {state}."
+
     return [
         github_create_issue,
         github_comment,
@@ -358,4 +453,6 @@ def get_write_tools(default_repo="", emit=None) -> list:
         github_close,
         github_set_labels,
         github_set_assignees,
+        github_reply_thread,
+        github_resolve_thread,
     ]
