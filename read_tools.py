@@ -740,6 +740,71 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         return _bounded("\n".join(lines), _MAX_PR_CHARS)
 
     @tool
+    async def github_review_threads(number: int, repo: str = "", include_resolved: bool = False) -> str:
+        """List a pull request's review THREADS (the inline, resolvable conversations —
+        CodeRabbit's and reviewers' line comments), with the thread id you pass to
+        ``github_reply_thread`` / ``github_resolve_thread``. Unresolved review threads keep a
+        PR's QA check from clearing, so after a fix round, read them here, then answer and
+        resolve each one.
+
+        Args:
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            number: Pull request number.
+            include_resolved: Also list already-resolved threads (default: unresolved only).
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        owner, name = repo.split("/", 1)
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
+            "pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line "
+            "comments(first:1){totalCount nodes{author{login} body url}}}}}}}"
+        )
+        rc, out, serr = await run_gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-F",
+                f"number={int(number)}",
+            ]
+        )
+        if gh_err := check_gh_error(rc, serr, repo=repo):
+            return gh_err
+        d, perr = parse_json(out, dict)
+        if perr:
+            return perr
+        pr = ((d.get("data") or {}).get("repository") or {}).get("pullRequest")
+        if not isinstance(pr, dict):
+            return f"Error: {repo}#{number} is not a pull request (or isn't visible to this token)."
+        threads = dicts((pr.get("reviewThreads") or {}).get("nodes"))
+        shown = [t for t in threads if include_resolved or not t.get("isResolved")]
+        if not shown:
+            return f"No {'' if include_resolved else 'unresolved '}review threads on {repo}#{number}."
+        open_n = sum(1 for t in threads if not t.get("isResolved"))
+        lines = [f"{open_n} unresolved of {len(threads)} review thread(s) on {repo}#{number}:"]
+        for t in shown:
+            first = (dicts((t.get("comments") or {}).get("nodes")) or [{}])[0]
+            body = " ".join(str(first.get("body") or "").split())
+            if len(body) > _MAX_COMMENT_CHARS:
+                body = body[: _MAX_COMMENT_CHARS - 1] + "…"
+            where = f"{t.get('path') or '?'}:{t.get('line') or '?'}"
+            state = "resolved" if t.get("isResolved") else ("outdated" if t.get("isOutdated") else "open")
+            replies = int(((t.get("comments") or {}).get("totalCount") or 1)) - 1
+            lines.append(
+                f"--- {t.get('id')} [{state}] {where} · {_login(first.get('author'))}"
+                + (f" · {replies} repl{'y' if replies == 1 else 'ies'}" if replies > 0 else "")
+                + f"\n{body or '(empty)'}"
+            )
+        return _bounded("\n".join(lines), _MAX_PR_CHARS)
+
+    @tool
     async def github_search_issues(query: str, repo: str = "", state: str = "open", limit: int = 20) -> str:
         """Search a repo's issues by text — DEDUPE BEFORE FILING: call this with the
         gist of a problem before ``github_create_issue`` and reference or reopen a
@@ -815,6 +880,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         github_repo_contents,
         github_list_prs,
         github_issue_comments,
+        github_review_threads,
         github_search_issues,
         github_status,
     ]

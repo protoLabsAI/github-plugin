@@ -39,6 +39,7 @@ _ARGS: dict[str, dict] = {
     "github_repo_contents": {"repo": "o/n", "path": "src"},
     "github_list_prs": {"repo": "o/n"},
     "github_issue_comments": {"repo": "o/n", "number": 1},
+    "github_review_threads": {"repo": "o/n", "number": 1},
     "github_search_issues": {"repo": "o/n", "query": "crash"},
     "github_status": {},
     # create_issue is body-GATED (v0.7.0) — a gate-passing body so the sweep reaches gh.
@@ -50,6 +51,8 @@ _ARGS: dict[str, dict] = {
     "github_close": {"repo": "o/n", "number": 1},
     "github_set_labels": {"repo": "o/n", "number": 1, "add": "bug"},
     "github_set_assignees": {"repo": "o/n", "number": 1, "add": "kj"},
+    "github_reply_thread": {"thread_id": "PRRT_abcdef123", "body": "b", "resolve": True},
+    "github_resolve_thread": {"thread_id": "PRRT_abcdef123"},
     "github_review_comment": {"repo": "o/n", "number": 1, "body": "b"},
     "github_review_approve": {"repo": "o/n", "number": 1, "body": "b"},
     "github_review_request_changes": {"repo": "o/n", "number": 1, "body": "b"},

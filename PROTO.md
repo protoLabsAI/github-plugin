@@ -88,7 +88,7 @@ data routes, the `token` secret — reads through them per call. Never capture a
 value at register time: an `onboard_project` mid-session, or a token pasted in
 Settings, must be seen by the very next call.
 
-## 5. Tools (all implemented — 15 read / 8 write / 3 review = 26)
+## 5. Tools (all implemented — 16 read / 10 write / 3 review = 29)
 
 Each tool mocks `run_gh` in its test and asserts the exact argv + readable errors.
 `tests/test_no_raise_sweep.py` additionally invokes EVERY registered tool against a
