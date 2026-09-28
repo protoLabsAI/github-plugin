@@ -1113,3 +1113,88 @@ def test_render_invariants_over_random_files():
             assert (int(m[1]), int(m[2]), int(m[3])) == (start, total, len(line)) and len(line) > cap
             assert shown == line[:cap]
             assert (m[6] is None) == (start >= total)
+
+
+# ── a 404 on a contents read names the nearest existing directory ───────────────
+
+_NOT_FOUND = (1, "", "gh: Not Found (HTTP 404)")
+_SRC_LISTING = json.dumps(
+    [
+        {"name": "ThemeQuickButton.tsx", "type": "file"},
+        {"name": "goals", "type": "dir"},
+    ]
+)
+
+
+def _tree_gh(existing: dict[str, str], calls: list):
+    """A fake `gh`: contents reads succeed only for the directories in ``existing``."""
+
+    async def fake_gh(args, **kw):
+        calls.append(args)
+        endpoint = next(a for a in args if a.startswith("repos/"))
+        if "/pulls/" in endpoint:
+            return 0, "b" * 40 + "\n", ""
+        path = endpoint.split("/contents", 1)[1].lstrip("/")
+        if path in existing:
+            return 0, existing[path], ""
+        return _NOT_FOUND
+
+    return fake_gh
+
+
+@pytest.mark.asyncio
+async def test_read_file_404_lists_the_nearest_existing_directory():
+    calls: list = []
+    fake = _tree_gh({"apps/web/src": _SRC_LISTING}, calls)
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=fake)):
+        out = await _read_file_tool().ainvoke(
+            {"repo": "o/r", "path": "apps/web/src/settings/ThemeQuickDialog.tsx", "ref": "abc123"}
+        )
+    assert out.startswith("Error: 'apps/web/src/settings/ThemeQuickDialog.tsx' does not exist in o/r at abc123")
+    assert "the PATH is wrong" in out
+    assert "'apps/web/src' contains: ThemeQuickButton.tsx, goals/" in out
+    # every probe is a GET pinned to the same ref — a POST would 404 regardless (#118)
+    for args in calls:
+        assert args[:3] == ["api", "--method", "GET"]
+        assert "ref=abc123" in args
+
+
+@pytest.mark.asyncio
+async def test_read_pr_file_404_lists_the_directory_at_the_pr_head():
+    calls: list = []
+    fake = _tree_gh({"apps/web/src": _SRC_LISTING}, calls)
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=fake)):
+        out = await _read_pr_file_tool().ainvoke(
+            {"repo": "o/r", "number": 3771, "path": "apps/web/src/goals/GoalCreateDialog.tsx"}
+        )
+    assert out.startswith("Error reading apps/web/src/goals/GoalCreateDialog.tsx at o/r#3771 head bbbbbbbbbbbb:")
+    assert "contains: ThemeQuickButton.tsx, goals/" in out
+    assert all(f"ref={'b' * 40}" in a for a in calls[1:])
+
+
+@pytest.mark.asyncio
+async def test_404_with_no_existing_parent_keeps_the_classified_error():
+    # the ref (or repo) is what's wrong — no directory to point at, so the old message stands
+    calls: list = []
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=_tree_gh({}, calls))):
+        out = await _read_file_tool().ainvoke({"repo": "o/r", "path": "a/b/c/d/e/f.py", "ref": "nope"})
+    assert out.startswith("Error: repo 'o/r' not found or not accessible, or the path/ref/number doesn't exist")
+    assert len(calls) == 1 + 4  # the read + the capped parent probes
+
+
+@pytest.mark.asyncio
+async def test_non_404_failure_skips_the_directory_probe():
+    mock = AsyncMock(return_value=(1, "", "API rate limit exceeded (HTTP 403)"))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _read_file_tool().ainvoke({"repo": "o/r", "path": "x/y.py"})
+    assert "rate limit" in out
+    assert mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_path_hint_caps_the_listing():
+    listing = json.dumps([{"name": f"f{i:03d}.py", "type": "file"} for i in range(75)])
+    with patch("ghplugin.read_tools.run_gh", new=AsyncMock(side_effect=_tree_gh({"": listing}, []))):
+        out = await _read_file_tool().ainvoke({"repo": "o/r", "path": "nope.py"})
+    assert "'.' contains: f000.py" in out and "f059.py" in out and "f060.py" not in out
+    assert "(+15 more)" in out

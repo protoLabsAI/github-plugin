@@ -141,6 +141,45 @@ def _render_file(
     return True, body + ("" if body.endswith("\n") else "\n") + marker
 
 
+_MAX_HINT_ENTRIES = 60  # directory entries listed in a missing-path hint
+_MAX_HINT_PROBES = 4  # parent directories probed before giving up (a 404 costs a call each)
+
+
+async def _missing_path_hint(repo: str, path: str, ref: str) -> str | None:
+    """For a contents read that 404'd: the nearest EXISTING parent directory and its
+    entries, or None when no probed parent exists (then the repo or ref is the problem).
+
+    A bare 404 reads to a model as "repo not accessible", so it guesses sibling paths one
+    call at a time (a review burned 20+ reads on invented filenames). Listing the
+    directory that does exist turns that into one pick."""
+    parts = [p for p in path.strip().strip("/").split("/") if p]
+    parents = ["/".join(parts[:i]) for i in range(len(parts) - 1, -1, -1)][:_MAX_HINT_PROBES]
+    for parent in parents:
+        args = ["api", "--method", "GET", f"repos/{repo}/contents/{parent}" if parent else f"repos/{repo}/contents"]
+        if ref.strip():
+            args += ["-f", f"ref={ref.strip()}"]
+        rc, out, serr = await run_gh(args)
+        if rc != 0:
+            if error_kind(rc, serr or out) != "not_found":
+                return None  # auth / rate limit — not evidence about the path
+            continue
+        items, perr = parse_json(out, (list,))
+        if perr:
+            return None
+        entries = sorted(
+            f"{e.get('name', '?')}/" if e.get("type") == "dir" else str(e.get("name", "?")) for e in dicts(items)
+        )
+        shown = ", ".join(entries[:_MAX_HINT_ENTRIES])
+        more = f", … (+{len(entries) - _MAX_HINT_ENTRIES} more)" if len(entries) > _MAX_HINT_ENTRIES else ""
+        at = f" at {ref.strip()[:12]}" if ref.strip() else ""
+        return (
+            f"Error: '{path}' does not exist in {repo}{at} — the repo and ref are fine, the PATH is wrong. "
+            f"The nearest existing directory '{parent or '.'}' contains: {shown}{more}. "
+            "Pick from these (or list a subdirectory with github_repo_contents) instead of guessing another path."
+        )
+    return None
+
+
 # statusCheckRollup carries two shapes (verified against gh 2.92): a CheckRun
 # {name, status: COMPLETED|IN_PROGRESS|QUEUED|…, conclusion: SUCCESS|FAILURE|SKIPPED|
 # CANCELLED|NEUTRAL|TIMED_OUT|ACTION_REQUIRED|""} and a StatusContext {context,
@@ -509,6 +548,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
             args += ["-f", f"ref={ref}"]
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr, repo=repo):
+            if error_kind(rc, serr) == "not_found" and (hint := await _missing_path_hint(repo, path, ref)):
+                return hint
             return gh_err
         # The contents API always returns the WHOLE file; the range is sliced here.
         return _render_file(out, start_line, end_line, path=path)[1]
@@ -568,6 +609,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         if gh_err := check_gh_error(rc, serr, repo=repo):
             # Fail LOUD, never fall back to the default branch: a silent fallback is
             # exactly the bug this tool exists to prevent.
+            if error_kind(rc, serr) == "not_found" and (hint := await _missing_path_hint(repo, path, head)):
+                gh_err = hint
             return f"Error reading {path} at {repo}#{number} head {head[:12]}: {gh_err}"
         ok, out = _render_file(out, start_line, end_line, path=f"{path} at {repo}#{number} head {head[:12]}")
         if not ok:  # a start_line past EOF — the error alone, no content header over it
