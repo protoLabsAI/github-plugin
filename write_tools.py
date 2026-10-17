@@ -12,11 +12,15 @@ The set:
   - github_comment       — `gh issue comment` (works for PRs too — a PR is an issue).
   - github_create_pr     — `gh pr create` (returns the new PR URL).
   - github_edit_pr       — `gh pr edit` (+ `gh pr ready`) to change title/body/draft.
+  - github_edit_issue    — `gh issue edit` to change an issue's title and/or body
+    (refuses when neither is given, never posting an empty edit).
   - github_merge_pr      — `gh pr merge`. IRREVERSIBLE, so it refuses without an
     explicit ``confirm=true`` and offers a ``dry_run`` preview (defence-in-depth on
     top of the per-agent write gate).
   - github_close         — close/reopen an issue or PR (`gh {issue,pr} close|reopen`).
   - github_set_labels    — add/remove labels (`gh {issue,pr} edit --add/--remove-label`).
+  - github_create_label  — `gh label create` a new label (never `--force`; an existing
+    label is reported as such, not overwritten).
   - github_set_assignees — add/remove assignees (`gh {issue,pr} edit --add/--remove-assignee`).
   - github_reply_thread  — reply INSIDE a PR review thread (GraphQL
     addPullRequestReviewThreadReply), optionally resolving it in the same call.
@@ -253,6 +257,33 @@ def get_write_tools(default_repo="", emit=None) -> list:
         return url or f"Edited PR #{number} in {repo}."
 
     @tool
+    async def github_edit_issue(number: int, repo: str = "", title: str = "", body: str = "") -> str:
+        """Edit a GitHub issue's title and/or body.
+
+        Args:
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            number: Issue number.
+            title: New title (omit to leave unchanged).
+            body: New body / description, Markdown (omit to leave unchanged).
+
+        Returns the issue URL (gh's stdout), or an Error when neither title nor body is given.
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        if not (title or body):
+            return "Error: nothing to change — pass title and/or body."
+        args = ["issue", "edit", str(number), "--repo", repo]
+        if title:
+            args += ["--title", title]
+        if body:
+            args += ["--body", body]
+        rc, out, serr = await run_gh(args)
+        if gh_err := check_gh_error(rc, serr, repo=repo):
+            return gh_err
+        return out.strip() or f"Edited issue #{number} in {repo}."
+
+    @tool
     async def github_merge_pr(
         number: int,
         repo: str = "",
@@ -361,6 +392,39 @@ def get_write_tools(default_repo="", emit=None) -> list:
         return out.strip() or f"Updated labels on {kind} #{number} in {repo}."
 
     @tool
+    async def github_create_label(name: str, repo: str = "", color: str = "", description: str = "") -> str:
+        """Create a new label in a repository (`gh label create`). Does NOT overwrite an
+        existing label — no ``--force`` — so a label that already exists is reported as
+        such, not an error trace, and its color/description are left untouched. Use this
+        before ``github_set_labels`` when the label you want to apply doesn't exist yet.
+
+        Args:
+            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
+            name: The label name.
+            color: Optional 6-character hex color (no leading ``#``); gh picks a random one if omitted.
+            description: Optional label description.
+
+        Returns a short confirmation, or a readable "already exists" message.
+        """
+        repo = resolve_repo(repo, default_repo) or ""
+        if err := bad_repo(repo):
+            return err
+        if not (name or "").strip():
+            return "Error: label name is required."
+        args = ["label", "create", name, "--repo", repo]
+        if color:
+            args += ["--color", color]
+        if description:
+            args += ["--description", description]
+        rc, out, serr = await run_gh(args)
+        low = (serr or "").lower()
+        if rc != 0 and ("already exists" in low or "already_exists" in low):
+            return f"Label {name!r} already exists in {repo} — not overwritten (github_create_label never forces)."
+        if gh_err := check_gh_error(rc, serr, repo=repo):
+            return gh_err
+        return out.strip() or f"Created label {name!r} in {repo}."
+
+    @tool
     async def github_set_assignees(
         number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
     ) -> str:
@@ -451,9 +515,11 @@ def get_write_tools(default_repo="", emit=None) -> list:
         github_comment,
         github_create_pr,
         github_edit_pr,
+        github_edit_issue,
         github_merge_pr,
         github_close,
         github_set_labels,
+        github_create_label,
         github_set_assignees,
         github_reply_thread,
         github_resolve_thread,
