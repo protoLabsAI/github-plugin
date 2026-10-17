@@ -23,18 +23,20 @@ issue or PR), `github_review_threads` (a PR's resolvable review threads with the
 (is `gh` installed / signed in, as whom, which default repo — the self-diagnosis probe
 the model calls when another tool errors).
 
-**Write** (only when `github.write: true`, 10): `github_create_issue` (body-**gated** —
+**Write** (only when `github.write: true`, 12): `github_create_issue` (body-**gated** —
 the same Problem / repro / acceptance sections the `/issue` command requires; a thin
 body gets the scaffold back, never posted), `github_comment`, `github_create_pr`,
-`github_edit_pr`, `github_merge_pr` (`confirm`-guarded), `github_close`,
-`github_set_labels`, `github_set_assignees`, `github_reply_thread` (answer a review
-thread in place, optionally resolving it) and `github_resolve_thread` (resolve / unresolve).
+`github_edit_pr`, `github_edit_issue` (change an issue's title/body), `github_merge_pr`
+(`confirm`-guarded), `github_close`, `github_set_labels`, `github_create_label` (add a
+label, never `--force`; an existing one is reported, not overwritten),
+`github_set_assignees`, `github_reply_thread` (answer a review thread in place,
+optionally resolving it) and `github_resolve_thread` (resolve / unresolve).
 
 **Review** (also behind `github.write`, 3): `github_review_comment`,
 `github_review_approve`, `github_review_request_changes` — the formal verdict tools,
 with the CI-terminal and self-review guards enforced inside the tool (ADR 0078).
 
-29 tools in all, every one covered by the no-raise sweep.
+31 tools in all, every one covered by the no-raise sweep.
 
 Plus the **user-only `/issue` chat command** (file an issue from the composer on any
 agent, without the model) and two console views — the read-only Issues/PRs **board**

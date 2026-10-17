@@ -331,6 +331,64 @@ async def test_edit_pr_requires_a_change_and_validates_state():
     fake.assert_not_called()
 
 
+# --- github_edit_issue -------------------------------------------------------
+
+
+async def test_edit_issue_title_only():
+    """Title only → `gh issue edit <n>` with --title and NO --body."""
+    tool = _by_name("github_edit_issue")
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/3\n", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 3, "title": "New title"})
+    assert out == "https://github.com/o/n/issues/3"
+    args = fake.call_args.args[0]
+    assert args[:5] == ["issue", "edit", "3", "--repo", "o/n"]
+    assert args[args.index("--title") + 1] == "New title"
+    assert "--body" not in args
+
+
+async def test_edit_issue_body_only():
+    """Body only → --body and NO --title."""
+    tool = _by_name("github_edit_issue")
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/4", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "number": 4, "body": "Rewritten body"})
+    args = fake.call_args.args[0]
+    assert args[:5] == ["issue", "edit", "4", "--repo", "o/n"]
+    assert args[args.index("--body") + 1] == "Rewritten body"
+    assert "--title" not in args
+
+
+async def test_edit_issue_title_and_body():
+    """Both → both flags, one `gh issue edit` call."""
+    tool = _by_name("github_edit_issue")
+    fake = AsyncMock(return_value=(0, "https://github.com/o/n/issues/5", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "number": 5, "title": "T", "body": "B"})
+    args = fake.call_args.args[0]
+    assert args[:5] == ["issue", "edit", "5", "--repo", "o/n"]
+    assert args[args.index("--title") + 1] == "T"
+    assert args[args.index("--body") + 1] == "B"
+
+
+async def test_edit_issue_requires_a_change_and_runs_nothing():
+    """Neither title nor body → an Error string, and gh is never invoked."""
+    tool = _by_name("github_edit_issue")
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 1})
+    assert out.startswith("Error: nothing to change")
+    fake.assert_not_called()
+
+
+async def test_edit_issue_gh_failure_returns_check_gh_error():
+    tool = _by_name("github_edit_issue")
+    fake = AsyncMock(return_value=(1, "", "could not edit issue: forbidden"))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 1, "title": "t"})
+    assert out == "Error (gh exit 1): could not edit issue: forbidden"
+
+
 # --- github_merge_pr (guarded) ----------------------------------------------
 
 
@@ -402,6 +460,16 @@ async def test_reopen_ignores_comment_and_uses_reopen():
     assert "--comment" not in args
 
 
+async def test_reopen_issue_invokes_gh_issue_reopen():
+    """github_close(reopen=true, kind="issue") → `gh issue reopen <n>` (confirming the
+    issue's ask explicitly, kind spelled out)."""
+    tool = _by_name("github_close")
+    fake = AsyncMock(return_value=(0, "", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "number": 5, "reopen": True, "kind": "issue"})
+    assert fake.call_args.args[0] == ["issue", "reopen", "5", "--repo", "o/n"]
+
+
 async def test_close_validates_kind():
     tool = _by_name("github_close")
     fake = AsyncMock()
@@ -445,14 +513,72 @@ async def test_set_assignees_pr_kind_add_and_remove():
     assert [args[i + 1] for i, a in enumerate(args) if a == "--remove-assignee"] == ["carol"]
 
 
+# --- github_create_label -----------------------------------------------------
+
+
+async def test_create_label_minimal_argv():
+    """`gh label create <name> --repo …` with no color/description flags when omitted."""
+    tool = _by_name("github_create_label")
+    fake = AsyncMock(return_value=(0, "", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "name": "needs-triage"})
+    args = fake.call_args.args[0]
+    assert args == ["label", "create", "needs-triage", "--repo", "o/n"]
+    assert out == "Created label 'needs-triage' in o/n."
+
+
+async def test_create_label_with_color_and_description():
+    """Optional color/description become --color / --description flags."""
+    tool = _by_name("github_create_label")
+    fake = AsyncMock(return_value=(0, "", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke({"repo": "o/n", "name": "bug", "color": "E99695", "description": "Something broke"})
+    args = fake.call_args.args[0]
+    assert args[:5] == ["label", "create", "bug", "--repo", "o/n"]
+    assert args[args.index("--color") + 1] == "E99695"
+    assert args[args.index("--description") + 1] == "Something broke"
+    assert "--force" not in args
+
+
+async def test_create_label_already_exists_is_readable_not_an_error_trace():
+    """An existing label (gh fails with an "already exists" stderr) returns a readable
+    message, not the generic `Error (gh exit N): …` trace."""
+    tool = _by_name("github_create_label")
+    fake = AsyncMock(return_value=(1, "", 'label with name "bug" already exists'))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "name": "bug"})
+    assert "already exists" in out and "o/n" in out
+    assert not out.startswith("Error (gh exit")
+
+
+async def test_create_label_requires_a_name():
+    tool = _by_name("github_create_label")
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "name": " "})
+    assert out.startswith("Error:") and "name" in out
+    fake.assert_not_called()
+
+
+async def test_create_label_gh_failure_returns_check_gh_error():
+    """A non-"already exists" failure still goes through check_gh_error."""
+    tool = _by_name("github_create_label")
+    fake = AsyncMock(return_value=(1, "", "could not create label: forbidden"))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "name": "bug"})
+    assert out == "Error (gh exit 1): could not create label: forbidden"
+
+
 async def test_new_write_tools_bad_repo_short_circuits():
     """Every new write tool validates the repo before shelling out."""
     fake = AsyncMock()
     cases = [
         ("github_edit_pr", {"repo": "x", "number": 1, "title": "t"}),
+        ("github_edit_issue", {"repo": "x", "number": 1, "title": "t"}),
         ("github_merge_pr", {"repo": "x", "number": 1, "confirm": True}),
         ("github_close", {"repo": "x", "number": 1}),
         ("github_set_labels", {"repo": "x", "number": 1, "add": "bug"}),
+        ("github_create_label", {"repo": "x", "name": "bug"}),
         ("github_set_assignees", {"repo": "x", "number": 1, "add": "alice"}),
     ]
     for name, kwargs in cases:

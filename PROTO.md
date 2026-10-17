@@ -41,7 +41,7 @@ gh_cli.py                # vendored async `gh` runner: binary resolution (PATH +
 status.py                # the first-run probe: compute_status / summarize_status / report_gaps (setup-gap seam)
 projects.py              # repo sources: host projects: registry (ADR 0095) + checkout `origin` remote parsing
 read_tools.py            # 16 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + status + list_prs/comments/search + review_threads)
-write_tools.py           # 10 write tools (create/edit/merge/close/comment/labels/assignees + reply/resolve review threads) — gated
+write_tools.py           # 12 write tools (create/edit issue+pr/merge/close/comment/labels+create-label/assignees + reply/resolve review threads) — gated
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
 api.py                   # routers — public PAGES (view/new-issue) + gated data routes (config/status/issues/prs/issue)
@@ -88,7 +88,7 @@ data routes, the `token` secret — reads through them per call. Never capture a
 value at register time: an `onboard_project` mid-session, or a token pasted in
 Settings, must be seen by the very next call.
 
-## 5. Tools (all implemented — 16 read / 10 write / 3 review = 29)
+## 5. Tools (all implemented — 16 read / 12 write / 3 review = 31)
 
 Each tool mocks `run_gh` in its test and asserts the exact argv + readable errors.
 `tests/test_no_raise_sweep.py` additionally invokes EVERY registered tool against a
@@ -142,9 +142,12 @@ the label. The section regexes are in LOCKSTEP with `.github/workflows/issue-gat
 in protoAgent — change both, `test_section_regexes_match_protoagents_ci_gate` pins a
 sample per alternative) / `github_comment` / `github_create_pr` (return the new URL),
 `github_edit_pr` (`gh pr edit` + `gh pr ready [--undo]`),
+`github_edit_issue` (`gh issue edit` title/body — refuses with an Error when neither is given),
 `github_merge_pr` (`gh pr merge` — **refuses without `confirm=true`**, offers `dry_run`),
-`github_close` (close/reopen issue|pr), and `github_set_labels` / `github_set_assignees`
-(`gh {issue,pr} edit --add/--remove-{label,assignee}`). Issue-vs-PR ops take `kind`.
+`github_close` (close/reopen issue|pr), `github_set_labels` / `github_set_assignees`
+(`gh {issue,pr} edit --add/--remove-{label,assignee}`), and `github_create_label`
+(`gh label create` — never `--force`; an existing label is reported, not overwritten).
+Issue-vs-PR ops take `kind`.
 
 **Review (gated on `github.write`)** — `github_review_comment` (always allowed),
 `github_review_approve` / `github_review_request_changes` (refused while CI is pending
