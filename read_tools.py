@@ -32,7 +32,8 @@ _CI_ERR_RE = re.compile(
 )
 
 
-_MAX_PR_CHARS = 12000  # github_get_pr's total output bound
+_MAX_PR_CHARS = 12000  # Default total output bound for PRs and issues
+_MAX_BODY_CHARS = 60000
 _MAX_REVIEWS = 10
 _MAX_COMMENT_CHARS = 1000
 
@@ -203,6 +204,28 @@ def _bounded(text: str, cap: int) -> str:
     return text if len(text) <= cap else text[:cap] + f"\n… (truncated at {cap} chars)"
 
 
+def _bounded_body(header: str, body: str, body_max_chars: int) -> str:
+    """Keep the body marker intact even when metadata alone exceeds the budget."""
+    requested = max(0, min(body_max_chars, _MAX_BODY_CHARS))
+    if requested:
+        header = _bounded(header, _MAX_PR_CHARS)
+        shown = min(len(body), requested)
+    else:
+        if len(header) + 2 + len(body) <= _MAX_PR_CHARS:
+            return header + "\n\n" + body
+        # Reserve the longest possible body marker before bounding metadata.
+        reserve = len(f"\n[truncated: body shows {len(body)} of {len(body)} chars]") if body else 0
+        metadata_marker = "\n… (metadata truncated)"
+        header_cap = _MAX_PR_CHARS - 2 - reserve
+        if len(header) > header_cap:
+            header = header[: header_cap - len(metadata_marker)] + metadata_marker
+        shown = min(len(body), max(0, _MAX_PR_CHARS - len(header) - 2 - reserve))
+    result = header + "\n\n" + body[:shown]
+    if shown < len(body):
+        result += f"\n[truncated: body shows {shown} of {len(body)} chars]"
+    return result
+
+
 def _summarize_checks(rollup) -> str:
     """``N pass / N fail / N pending (/ N skipped) — failing: a, b`` from a PR's
     statusCheckRollup; ``none`` when the commit has no checks."""
@@ -257,7 +280,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
             return []
 
     @tool
-    async def github_get_pr(number: int, repo: str = "") -> str:
+    async def github_get_pr(number: int, repo: str = "", body_max_chars: int = 0) -> str:
         """Fetch a GitHub pull request — the merge-readiness picture in one call: title,
         state, draft?, author, branch, review decision, mergeability + merge state, a
         checks summary (N pass / N fail / N pending + the failing check names), the
@@ -266,6 +289,9 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: PR number.
+            body_max_chars: Body characters to fetch, capped at 60000. 0 (or negative)
+                uses the remaining 12000-character response budget. Do not round-trip-edit
+                a truncated body; fetch it in full with a larger limit first.
         """
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
@@ -313,17 +339,20 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
             f"mergeable: {d.get('mergeable') or '?'} | merge state: {d.get('mergeStateStatus') or '?'}\n"
             f"checks: {checks}\n"
             f"reviews ({len(reviews)}):" + ("\n" + "\n".join(review_lines) if review_lines else " none") + "\n"
-            f"files: {files or '(none)'}\n\n{(d.get('body') or '').strip()[:2000]}"
+            f"files: {files or '(none)'}"
         )
-        return _bounded(text, _MAX_PR_CHARS)
+        return _bounded_body(text, str(d.get("body") or ""), body_max_chars)
 
     @tool
-    async def github_get_issue(number: int, repo: str = "") -> str:
+    async def github_get_issue(number: int, repo: str = "", body_max_chars: int = 0) -> str:
         """Fetch a GitHub issue: title, state, author, labels, and body.
 
         Args:
             repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
             number: Issue number.
+            body_max_chars: Body characters to fetch, capped at 60000. 0 (or negative)
+                uses the remaining 12000-character response budget. Do not round-trip-edit
+                a truncated body; fetch it in full with a larger limit first.
         """
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
@@ -337,11 +366,12 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         if perr:
             return perr
         labels = ", ".join(str(lbl.get("name", "")) for lbl in dicts(d.get("labels")))
-        return (
+        text = (
             f"Issue #{d.get('number')} [{d.get('state')}] {d.get('title')}\n"
             f"by {_login(d.get('author'))} | labels: {labels or '(none)'} | "
-            f"{d.get('url')}\n\n{(d.get('body') or '').strip()[:2000]}"
+            f"{d.get('url')}"
         )
+        return _bounded_body(text, str(d.get("body") or ""), body_max_chars)
 
     @tool
     async def github_list_issues(repo: str = "", state: str = "open", limit: int = 20) -> str:
