@@ -561,9 +561,7 @@ async def test_get_pr_with_no_checks_or_reviews_says_so():
 
 @pytest.mark.asyncio
 async def test_get_pr_output_is_bounded():
-    """A huge body + 40 long reviews + long file paths must end at the bound — and the
-    bound must actually be hit: the body is capped at 2000, reviews at 10 × 300, files
-    at 20 entries, so only the (uncapped) path lengths can carry this past 12k."""
+    """Oversized metadata must not hide the body truncation marker."""
     from ghplugin.read_tools import _MAX_PR_CHARS
 
     d = {
@@ -575,8 +573,9 @@ async def test_get_pr_output_is_bounded():
     }
     with patch("ghplugin.read_tools.run_gh", new=AsyncMock(return_value=(0, json.dumps(d), ""))):
         out = await _get_pr_tool().ainvoke({"repo": "owner/name", "number": 1})
-    assert out.endswith(f"… (truncated at {_MAX_PR_CHARS} chars)")
-    assert len(out) == _MAX_PR_CHARS + len(f"\n… (truncated at {_MAX_PR_CHARS} chars)")
+    assert out.endswith("[truncated: body shows 0 of 50000 chars]")
+    assert "metadata truncated" in out
+    assert len(out) <= _MAX_PR_CHARS
     assert "… 30 more review(s)" in out
 
 
@@ -1198,3 +1197,62 @@ async def test_missing_path_hint_caps_the_listing():
         out = await _read_file_tool().ainvoke({"repo": "o/r", "path": "nope.py"})
     assert "'.' contains: f000.py" in out and "f059.py" in out and "f060.py" not in out
     assert "(+15 more)" in out
+
+
+@pytest.mark.parametrize("kind", ["pr", "issue"])
+@pytest.mark.parametrize(
+    ("size", "limit", "shown"),
+    [
+        (5000, 0, 5000),
+        (30000, 0, None),
+        (30000, 40000, 30000),
+        (70000, 100000, 60000),
+        (30000, -1, None),
+        (100, 1, 1),
+        (100, 100, 100),
+        (0, 0, 0),
+    ],
+)
+async def test_get_body_limits(kind, size, limit, shown):
+    tool = next(t for t in get_read_tools() if t.name == f"github_get_{kind}")
+    body = (" λ\n" * ((size + 2) // 3))[:size]
+    data = {**json.loads(_PR_JSON), "body": body}
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, json.dumps(data), ""))):
+        result = await tool.ainvoke({"repo": "owner/name", "number": 38, "body_max_chars": limit})
+    rendered = result.split("\n\n", 1)[1]
+    if shown == size:
+        assert rendered == body
+        assert "[truncated:" not in result
+    else:
+        content, marker = rendered.rsplit("\n", 1)
+        assert content == body[: len(content)]
+        assert marker == f"[truncated: body shows {len(content)} of {size} chars]"
+        if shown is None:
+            assert 11000 < len(content) < 12000
+        else:
+            assert len(content) == shown
+    if limit <= 0:
+        assert len(result) <= 12000
+
+
+@pytest.mark.parametrize("kind", ["pr", "issue"])
+async def test_get_body_with_oversized_metadata(kind):
+    tool = next(t for t in get_read_tools() if t.name == f"github_get_{kind}")
+    for limit in (0, 40000):
+        data = {"title": "t" * 20000, "body": "b" * 30000}
+        with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, json.dumps(data), ""))):
+            result = await tool.ainvoke({"repo": "owner/name", "number": 1, "body_max_chars": limit})
+        if limit:
+            assert result.split("\n\n", 1)[1] == data["body"]
+        else:
+            assert result.endswith("[truncated: body shows 0 of 30000 chars]")
+            assert len(result) <= 12000
+
+
+@pytest.mark.parametrize("kind", ["pr", "issue"])
+@pytest.mark.parametrize("body", [None, 42, [], {}])
+async def test_get_body_unexpected_shape_never_raises(kind, body):
+    tool = next(t for t in get_read_tools() if t.name == f"github_get_{kind}")
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, json.dumps({"body": body}), ""))):
+        result = await tool.ainvoke({"repo": "owner/name", "number": 1})
+    assert isinstance(result, str)
