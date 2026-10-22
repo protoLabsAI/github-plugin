@@ -289,6 +289,8 @@ def get_write_tools(default_repo="", emit=None) -> list:
         repo: str = "",
         method: str = "squash",
         delete_branch: bool = False,
+        subject: str = "",
+        body: str = "",
         dry_run: bool = False,
         confirm: bool = False,
     ) -> str:
@@ -299,6 +301,11 @@ def get_write_tools(default_repo="", emit=None) -> list:
             number: PR number.
             method: ``squash`` (default), ``merge``, or ``rebase``.
             delete_branch: Delete the head branch after merging (default False).
+            subject: Merge-commit subject line. Squash/merge only — refused on rebase,
+                which GitHub ignores. A single-commit squash uses that COMMIT's subject,
+                not the PR title, unless subject is set — so fixing the PR title alone
+                does not fix the subject that lands on main.
+            body: Merge-commit body. Squash/merge only — refused on rebase.
             dry_run: If true, report what WOULD be merged without merging.
             confirm: Must be true to actually merge — a guard against accidental or
                 autonomous merges even when the per-agent write gate is on.
@@ -310,10 +317,18 @@ def get_write_tools(default_repo="", emit=None) -> list:
             return err
         if method not in ("squash", "merge", "rebase"):
             return f"Error: method must be 'squash', 'merge', or 'rebase' (got {method!r})."
+        if method == "rebase" and (subject or body):
+            return "Error: subject/body only apply to squash or merge — GitHub ignores them on a rebase merge."
         if dry_run:
             extra = " and delete its branch" if delete_branch else ""
+            detail = ""
+            if subject:
+                detail += f' with subject "{subject}"'
+            if body:
+                detail += f'{" and" if subject else " with"} body "{body}"'
             return (
-                f"DRY RUN — would merge PR #{number} in {repo} via {method}{extra}. Re-call with confirm=true to do it."
+                f"DRY RUN — would merge PR #{number} in {repo} via {method}{extra}{detail}. "
+                "Re-call with confirm=true to do it."
             )
         if not confirm:
             return (
@@ -323,6 +338,10 @@ def get_write_tools(default_repo="", emit=None) -> list:
         args = ["pr", "merge", str(number), "--repo", repo, f"--{method}"]
         if delete_branch:
             args.append("--delete-branch")
+        if subject:
+            args += ["--subject", subject]
+        if body:
+            args += ["--body", body]
         rc, out, serr = await run_gh(args)
         if gh_err := check_gh_error(rc, serr, repo=repo):
             return gh_err

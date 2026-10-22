@@ -429,6 +429,89 @@ async def test_merge_pr_validates_method():
     fake.assert_not_called()
 
 
+async def test_merge_pr_squash_with_subject():
+    tool = _by_name("github_merge_pr")
+    fake = AsyncMock(return_value=(0, "Merged", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke(
+            {
+                "repo": "o/n",
+                "number": 9,
+                "method": "squash",
+                "subject": "chore: release v0.16.0 (#48)",
+                "confirm": True,
+            }
+        )
+    args = fake.call_args.args[0]
+    assert args == ["pr", "merge", "9", "--repo", "o/n", "--squash", "--subject", "chore: release v0.16.0 (#48)"]
+
+
+async def test_merge_pr_merge_with_subject_body_and_delete_branch():
+    tool = _by_name("github_merge_pr")
+    fake = AsyncMock(return_value=(0, "Merged", ""))
+    with patch("ghplugin.write_tools.run_gh", fake):
+        await tool.ainvoke(
+            {
+                "repo": "o/n",
+                "number": 9,
+                "method": "merge",
+                "delete_branch": True,
+                "subject": "a subject",
+                "body": "a body",
+                "confirm": True,
+            }
+        )
+    args = fake.call_args.args[0]
+    assert args[-6:] == ["--merge", "--delete-branch", "--subject", "a subject", "--body", "a body"]
+
+
+async def test_merge_pr_rebase_refuses_subject():
+    tool = _by_name("github_merge_pr")
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 9, "method": "rebase", "subject": "x", "confirm": True})
+    assert out.startswith("Error") and "rebase" in out
+    fake.assert_not_called()
+
+
+async def test_merge_pr_rebase_refuses_body_on_dry_run():
+    tool = _by_name("github_merge_pr")
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 9, "method": "rebase", "body": "x", "dry_run": True})
+    assert out.startswith("Error") and "rebase" in out
+    fake.assert_not_called()
+
+
+async def test_merge_pr_dry_run_shows_subject_and_body():
+    tool = _by_name("github_merge_pr")
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke(
+            {
+                "repo": "o/n",
+                "number": 48,
+                "method": "squash",
+                "subject": "chore: release v0.16.0 (#48)",
+                "body": "release notes",
+                "dry_run": True,
+            }
+        )
+    assert out.startswith("DRY RUN")
+    assert 'subject "chore: release v0.16.0 (#48)"' in out
+    assert 'body "release notes"' in out
+    fake.assert_not_called()
+
+
+async def test_merge_pr_dry_run_without_subject_body_unchanged():
+    tool = _by_name("github_merge_pr")
+    fake = AsyncMock()
+    with patch("ghplugin.write_tools.run_gh", fake):
+        out = await tool.ainvoke({"repo": "o/n", "number": 9, "dry_run": True})
+    assert out == "DRY RUN — would merge PR #9 in o/n via squash. Re-call with confirm=true to do it."
+    fake.assert_not_called()
+
+
 # --- github_close / reopen ---------------------------------------------------
 
 
