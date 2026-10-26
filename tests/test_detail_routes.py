@@ -467,3 +467,265 @@ async def test_quoted_diff_paths():
     with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, diff, ""))):
         data = await fetch_pr_diff("o/n", 5)
     assert data["files"][0]["path"] == "café.txt"
+
+
+def _conversation(pr):
+    return {"data": {"repository": {"pullRequest": pr}}}
+
+
+def test_conversation_route_all_replies_and_variables():
+    from ghplugin.detail import _PR_CONVERSATION_QUERY
+
+    comment = {"author": {"login": "alice"}, "body": "hello", "createdAt": "today", "url": "comment-url"}
+    reply = {**comment, "body": "reply", "diffHunk": "@@ -1 +1 @@"}
+    review = {"author": None, "body": "review", "state": "COMMENTED", "submittedAt": "today"}
+    threads = [
+        {
+            "id": "T1",
+            "isResolved": False,
+            "isOutdated": True,
+            "path": "a.py",
+            "line": None,
+            "comments": {"nodes": [reply, {**reply, "body": "second reply"}]},
+        },
+        {"id": "T2", "isResolved": True, "comments": {"nodes": [reply]}},
+    ]
+    payload = _conversation(
+        {"comments": {"nodes": [comment]}, "reviews": {"nodes": [review]}, "reviewThreads": {"nodes": threads}}
+    )
+    fake = AsyncMock(return_value=(0, json.dumps(payload), ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        data = (
+            TestClient(_app())
+            .get("/api/plugins/github/detail/pr/conversation", params={"repo": "owner/repository", "number": 5})
+            .json()
+        )
+    fake.assert_awaited_once_with(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={_PR_CONVERSATION_QUERY}",
+            "-f",
+            "owner=owner",
+            "-f",
+            "name=repository",
+            "-F",
+            "number=5",
+        ]
+    )
+    for fragment in (
+        "query($owner:String!,$name:String!,$number:Int!)",
+        "repository(owner:$owner,name:$name)",
+        "pullRequest(number:$number)",
+        "comments(first:100){nodes{author{login} body createdAt url}}",
+        "reviews(first:50){nodes{author{login} state body submittedAt}}",
+        "reviewThreads(first:100){nodes{id isResolved isOutdated path line",
+        "comments(first:50){nodes{author{login} body createdAt url diffHunk}}",
+    ):
+        assert fragment in _PR_CONVERSATION_QUERY
+    assert data["comments"] == [{**comment, "truncated": False}]
+    assert data["reviews"] == [{**review, "truncated": False}]
+    assert data["threads"][0] == {
+        **threads[0],
+        "comments": [{**reply, "truncated": False}, {**reply, "body": "second reply", "truncated": False}],
+    }
+    assert data["counts"] == {"comments": 1, "threads": 2, "unresolved": 1}
+
+
+async def test_conversation_string_vars_use_lowercase_f_flag():
+    """owner/name are String! GraphQL vars: a digit-only or true/false/null repo (e.g.
+    ``user/2048``) must go through gh's string ``-f`` flag, not the typed ``-F`` which
+    would coerce it to a JSON int/bool/null and make GitHub reject every query."""
+    from ghplugin.detail import _PR_CONVERSATION_QUERY, fetch_pr_conversation
+
+    fake = AsyncMock(return_value=(0, json.dumps(_conversation({})), ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        await fetch_pr_conversation("2048/true", 5)
+    assert fake.await_args.args[0] == [
+        "api",
+        "graphql",
+        "-f",
+        f"query={_PR_CONVERSATION_QUERY}",
+        "-f",
+        "owner=2048",
+        "-f",
+        "name=true",
+        "-F",
+        "number=5",
+    ]
+
+
+def test_issue_route_fields_and_trimmed_comments():
+    issue = {
+        "number": 5,
+        "title": "Issue",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "description",
+        "author": {"login": "alice"},
+        "url": "issue-url",
+        "createdAt": "yesterday",
+        "updatedAt": "today",
+        "labels": [{"name": "bug"}],
+        "assignees": [{"login": "bob"}],
+        "milestone": {"title": "v1"},
+        "closedByPullRequestsReferences": [{"number": 6, "url": "pr-url"}],
+        "comments": [{"author": None, "body": "comment", "createdAt": "today", "url": "url", "id": "drop"}],
+    }
+    fake = AsyncMock(return_value=(0, json.dumps(issue), ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        data = TestClient(_app()).get("/api/plugins/github/detail/issue", params={"repo": "o/n", "number": 5}).json()
+    fake.assert_awaited_once_with(
+        [
+            "issue",
+            "view",
+            "5",
+            "--repo",
+            "o/n",
+            "--json",
+            "number,title,state,stateReason,author,body,url,createdAt,updatedAt,"
+            "labels,assignees,milestone,comments,closedByPullRequestsReferences",
+        ]
+    )
+    assert data == {
+        **issue,
+        "body_truncated": False,
+        "comments": [{"author": None, "body": "comment", "createdAt": "today", "url": "url", "truncated": False}],
+    }
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+async def test_conversation_and_issue_body_caps(offset):
+    from ghplugin.detail import fetch_issue_detail, fetch_pr_conversation
+
+    item = {"body": "é" * (20000 + offset)}
+    payload = _conversation(
+        {
+            "comments": {"nodes": [item]},
+            "reviews": {"nodes": [item]},
+            "reviewThreads": {"nodes": [{"comments": {"nodes": [item, item]}}]},
+        }
+    )
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, json.dumps(payload), ""))):
+        data = await fetch_pr_conversation("o/n", 5)
+    for row in [*data["comments"], *data["reviews"], *data["threads"][0]["comments"]]:
+        assert row["body"] == item["body"][:20000]
+        assert row["truncated"] is (offset > 0)
+    issue = {"body": "é" * (60000 + offset), "comments": [item]}
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, json.dumps(issue), ""))):
+        data = await fetch_issue_detail("o/n", 5)
+    assert data["body"] == issue["body"][:60000]
+    assert data["body_truncated"] is (offset > 0)
+    assert data["comments"][0]["body"] == item["body"][:20000]
+    assert data["comments"][0]["truncated"] is (offset > 0)
+
+
+@pytest.mark.parametrize("route", ["pr/conversation", "issue"])
+@pytest.mark.parametrize(
+    "invalid", [{"repo": "bad"}, {"number": 0}, {"number": -1}, {"number": "bad"}, {"number": "1.5"}]
+)
+def test_conversation_issue_route_validation(route, invalid):
+    with patch("ghplugin.detail.run_gh", AsyncMock()) as fake:
+        data = (
+            TestClient(_app())
+            .get(f"/api/plugins/github/detail/{route}", params={"repo": "o/n", "number": 5, **invalid})
+            .json()
+        )
+    assert "error" in data
+    fake.assert_not_called()
+
+
+@pytest.mark.parametrize("fetcher_name", ["fetch_pr_conversation", "fetch_issue_detail"])
+async def test_conversation_issue_direct_validation(fetcher_name):
+    from ghplugin import detail
+
+    with patch("ghplugin.detail.run_gh", AsyncMock()) as fake:
+        for number in (True, None, 1.5, "5", 0, -1):
+            assert "error" in await getattr(detail, fetcher_name)("o/n", number)
+    fake.assert_not_called()
+
+
+@pytest.mark.parametrize("route,payload", [("pr/conversation", _conversation({})), ("issue", {"body": "hello"})])
+def test_conversation_issue_cache_and_classified_errors(route, payload):
+    fake = AsyncMock(return_value=(0, json.dumps(payload), ""))
+    clock = [100.0]
+    params = {"repo": "o/n", "number": 5}
+    with patch("ghplugin.detail.run_gh", fake), patch("ghplugin.detail._now", lambda: clock[0]):
+        client = TestClient(_app())
+        url = f"/api/plugins/github/detail/{route}"
+        assert client.get(url, params=params).json() == client.get(url, params=params).json()
+        assert fake.await_count == 1
+        client.get(url, params={**params, "fresh": 1})
+        assert fake.await_count == 2
+        clock[0] += 15
+        client.get(url, params=params)
+        assert fake.await_count == 3
+        clear_cache()
+        for rc, stderr, expected in [
+            (4, "gh auth login", "not authenticated"),
+            (1, "HTTP 404: Not Found", "404"),
+            (1, "HTTP 429: rate limit", "rate limit"),
+        ]:
+            fake.return_value = (rc, "", stderr)
+            for _ in range(2):
+                assert expected in client.get(url, params=params).json()["error"]
+        assert fake.await_count == 9
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        "garbage",
+        {},
+        {"data": []},
+        {"data": {"repository": 42}},
+        _conversation(None),
+        _conversation([]),
+        {"errors": [{"message": "HTTP 429: rate limit"}], **_conversation({})},
+        {"errors": [None]},
+        {"errors": "bad"},
+    ],
+)
+async def test_garbage_conversation_is_error_and_not_cached(payload):
+    from ghplugin.detail import fetch_pr_conversation
+
+    fake = AsyncMock(return_value=(0, json.dumps(payload), ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        for _ in range(2):
+            data = await fetch_pr_conversation("o/n", 5)
+            assert "error" in data
+            if isinstance(payload, dict) and payload.get("errors") == [{"message": "HTTP 429: rate limit"}]:
+                assert "rate limit" in data["error"]
+    assert fake.await_count == 2
+
+
+@pytest.mark.parametrize("value", [None, 42, [], "bad", {"nodes": [None, 42]}])
+async def test_malformed_conversation_connections_and_issue_comments(value):
+    from ghplugin.detail import fetch_issue_detail, fetch_pr_conversation
+
+    pr = {"comments": value, "reviews": value, "reviewThreads": value}
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, json.dumps(_conversation(pr)), ""))):
+        data = await fetch_pr_conversation("o/n", 5)
+    assert data == {
+        "comments": [],
+        "reviews": [],
+        "threads": [],
+        "counts": {"comments": 0, "threads": 0, "unresolved": 0},
+    }
+    pr["reviewThreads"] = {"nodes": [{"comments": value}]}
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, json.dumps(_conversation(pr)), ""))):
+        assert (await fetch_pr_conversation("o/n", 5, fresh=True))["threads"][0]["comments"] == []
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, json.dumps({"comments": value}), ""))):
+        assert (await fetch_issue_detail("o/n", 5))["comments"] == []
+
+
+@pytest.mark.parametrize("output", ["invalid", "null", "[]"])
+@pytest.mark.parametrize("fetcher_name", ["fetch_pr_conversation", "fetch_issue_detail"])
+async def test_conversation_issue_invalid_json(fetcher_name, output):
+    from ghplugin import detail
+
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, output, ""))):
+        assert "error" in await getattr(detail, fetcher_name)("o/n", 5)

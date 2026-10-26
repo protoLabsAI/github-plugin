@@ -2,8 +2,7 @@
 
 The in-console PR/issue drawer (epic bd-nm78) needs the FULL object for one PR or
 issue, not the lean board row ``api.fetch_prs`` returns. These functions are the data
-foundation the drawer cards build on; this card adds the PR detail + its route only
-(no UI, no write routes).
+foundation the drawer cards build on (no UI, no write routes).
 
 Same contract as ``api.fetch_prs``: every `gh` call goes through ``run_gh``, the repo
 is validated with ``bad_repo``, failures are classified with ``check_gh_error``, the
@@ -38,6 +37,24 @@ _PR_DETAIL_FIELDS = (
 # A PR body can be large; cap what we hand the drawer (and flag the cut) so one giant
 # description can't blow the response budget. Matches read_tools._MAX_BODY_CHARS.
 _MAX_BODY_CHARS = 60000
+_MAX_COMMENT_CHARS = 20000
+
+# Verified with gh 2.92.0's `issue view 1 --json invalidField` field list.
+_ISSUE_DETAIL_FIELDS = (
+    "number,title,state,stateReason,author,body,url,createdAt,updatedAt,"
+    "labels,assignees,milestone,comments,closedByPullRequestsReferences"
+)
+
+# Fields verified against https://docs.github.com/en/graphql/reference/pulls
+# and /issues (IssueComment). Keep identifiers in variables, never in query text.
+_PR_CONVERSATION_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){"
+    "comments(first:100){nodes{author{login} body createdAt url}} "
+    "reviews(first:50){nodes{author{login} state body submittedAt}} "
+    "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
+    "comments(first:50){nodes{author{login} body createdAt url diffHunk}}}}}}}"
+)
 
 _DEFAULT_TTL = 15  # seconds — a drawer open + its reflexive refreshes share one `gh` call.
 
@@ -126,6 +143,101 @@ async def fetch_pr_detail(repo: str, number: int, fresh: bool = False) -> dict:
         return d
 
     return await cached(("pr", repo, number), _run, fresh=fresh)
+
+
+def _cap_body(item: dict, limit: int, flag: str = "truncated") -> dict:
+    body = item.get("body")
+    item[flag] = isinstance(body, str) and len(body) > limit
+    if item[flag]:
+        item["body"] = body[:limit]
+    return item
+
+
+def _nodes(connection) -> list[dict]:
+    return dicts(connection.get("nodes")) if isinstance(connection, dict) else []
+
+
+async def fetch_pr_conversation(repo: str, number: int, fresh: bool = False) -> dict:
+    """Comments, reviews and threads in one query, retaining every returned reply.
+
+    Counts describe the returned window: first 100 comments / 50 reviews / 100
+    threads, each with up to 50 comments. Bodies are capped at 20000 characters.
+    """
+    if err := bad_repo(repo):
+        return {"error": err}
+    if not _positive_int(number):
+        return {"error": "Error: PR number must be a positive integer."}
+
+    async def _run() -> dict:
+        owner, name = repo.split("/", 1)
+        rc, out, serr = await run_gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_PR_CONVERSATION_QUERY}",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-F",
+                f"number={number}",
+            ]
+        )
+        if err := check_gh_error(rc, serr, repo=repo):
+            return {"error": err}
+        data, err = parse_json(out, dict)
+        if err:
+            return {"error": err}
+        if data.get("errors"):
+            messages = "; ".join(str(e.get("message", e)) for e in dicts(data["errors"]))
+            return {"error": check_gh_error(1, messages or str(data["errors"]), repo=repo)}
+        pr = data
+        for key in ("data", "repository", "pullRequest"):
+            pr = pr.get(key) if isinstance(pr, dict) else None
+        if not isinstance(pr, dict):
+            return {"error": check_gh_error(1, "HTTP 404: pullRequest missing or inaccessible", repo=repo)}
+        comments = [_cap_body(c, _MAX_COMMENT_CHARS) for c in _nodes(pr.get("comments"))]
+        reviews = [_cap_body(r, _MAX_COMMENT_CHARS) for r in _nodes(pr.get("reviews"))]
+        threads = _nodes(pr.get("reviewThreads"))
+        for thread in threads:
+            thread["comments"] = [_cap_body(c, _MAX_COMMENT_CHARS) for c in _nodes(thread.get("comments"))]
+        return {
+            "comments": comments,
+            "reviews": reviews,
+            "threads": threads,
+            "counts": {
+                "comments": len(comments),
+                "threads": len(threads),
+                "unresolved": sum(not t.get("isResolved") for t in threads),
+            },
+        }
+
+    return await cached(("pr_conversation", repo, number), _run, fresh=fresh)
+
+
+async def fetch_issue_detail(repo: str, number: int, fresh: bool = False) -> dict:
+    """One issue with metadata, closing PRs and bounded description / comments."""
+    if err := bad_repo(repo):
+        return {"error": err}
+    if not _positive_int(number):
+        return {"error": "Error: Issue number must be a positive integer."}
+
+    async def _run() -> dict:
+        rc, out, serr = await run_gh(["issue", "view", str(number), "--repo", repo, "--json", _ISSUE_DETAIL_FIELDS])
+        if err := check_gh_error(rc, serr, repo=repo):
+            return {"error": err}
+        data, err = parse_json(out, dict)
+        if err:
+            return {"error": err}
+        _cap_body(data, _MAX_BODY_CHARS, "body_truncated")
+        data["comments"] = [
+            _cap_body({key: c.get(key) for key in ("author", "body", "createdAt", "url")}, _MAX_COMMENT_CHARS)
+            for c in dicts(data.get("comments"))
+        ]
+        return data
+
+    return await cached(("issue", repo, number), _run, fresh=fresh)
 
 
 async def fetch_pr_checks(repo: str, number: int, fresh: bool = False, *, run_id: int | None = None) -> dict:
