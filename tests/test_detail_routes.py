@@ -506,9 +506,9 @@ def test_conversation_route_all_replies_and_variables():
             "graphql",
             "-f",
             f"query={_PR_CONVERSATION_QUERY}",
-            "-F",
+            "-f",
             "owner=owner",
-            "-F",
+            "-f",
             "name=repository",
             "-F",
             "number=5",
@@ -531,6 +531,29 @@ def test_conversation_route_all_replies_and_variables():
         "comments": [{**reply, "truncated": False}, {**reply, "body": "second reply", "truncated": False}],
     }
     assert data["counts"] == {"comments": 1, "threads": 2, "unresolved": 1}
+
+
+async def test_conversation_string_vars_use_lowercase_f_flag():
+    """owner/name are String! GraphQL vars: a digit-only or true/false/null repo (e.g.
+    ``user/2048``) must go through gh's string ``-f`` flag, not the typed ``-F`` which
+    would coerce it to a JSON int/bool/null and make GitHub reject every query."""
+    from ghplugin.detail import _PR_CONVERSATION_QUERY, fetch_pr_conversation
+
+    fake = AsyncMock(return_value=(0, json.dumps(_conversation({})), ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        await fetch_pr_conversation("2048/true", 5)
+    assert fake.await_args.args[0] == [
+        "api",
+        "graphql",
+        "-f",
+        f"query={_PR_CONVERSATION_QUERY}",
+        "-f",
+        "owner=2048",
+        "-f",
+        "name=true",
+        "-F",
+        "number=5",
+    ]
 
 
 def test_issue_route_fields_and_trimmed_comments():
