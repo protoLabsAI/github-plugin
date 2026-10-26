@@ -126,7 +126,7 @@ def resolve_config(cfg: dict) -> dict:
 
 def build_view_router():
     """The PAGES — served under the PUBLIC ``/plugins/github`` prefix (ungated): the
-    read-only board (``/view``) and the compact file-an-issue form (``/new-issue``)."""
+    read-only board (``/view`` and ``/workspace``) and the compact file-an-issue form (``/new-issue``)."""
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse
 
@@ -134,6 +134,7 @@ def build_view_router():
 
     router = APIRouter()
 
+    @router.get("/workspace")
     @router.get("/view")
     async def _view():
         return HTMLResponse(PAGE)
