@@ -302,12 +302,14 @@ __SETUP_CSS__
       + (it.milestone && it.milestone.title ? '<dt>Milestone</dt><dd>'+esc(it.milestone.title)+'</dd>' : '')
       + (labels ? '<dt>Labels</dt><dd>'+labels+'</dd>' : '')+'</dl>';
     // closedByPullRequestsReferences carries no title on current gh — the chip shows #N (and a
-    // title only if a future gh adds one). Clicking switches this same drawer to that PR (same repo).
+    // title only if a future gh adds one). Preserve its repository for cross-repo closing PRs.
     const prs = (Array.isArray(it.closedByPullRequestsReferences) ? it.closedByPullRequestsReferences : [])
       .filter(p => p && p.number != null);
     const linked = prs.length
       ? '<div class="linked-prs"><h3>Linked pull requests</h3>'
-        + prs.map(p => '<button type="button" class="chip" data-linked-pr="'+esc(p.number)+'">#'
+        + prs.map(p => '<button type="button" class="chip" data-linked-pr="'+esc(p.number)
+            +'" data-linked-repo="'+esc(p.repository && p.repository.owner && p.repository.owner.login && p.repository.name
+              ? p.repository.owner.login+'/'+p.repository.name : '')+'">#'
             + esc(p.number)+(p.title ? ' '+esc(p.title) : '')+'</button>').join("")+'</div>'
       : '';
     return facts + linked
@@ -640,10 +642,10 @@ __SETUP_CSS__
   // Delegated so toggles survive the body's full re-render on each poll (the "details ↗" /
   // "view on GitHub ↗" links carry neither attribute, so they navigate instead of toggling).
   $("drawer-body").addEventListener("click", (e) => {
-    // A linked-PR chip switches THIS drawer to that PR (same repo), opening on Overview.
+    // Older gh may omit the linked repository; retain the issue-repo fallback in that case.
     const linkedPr = e.target.closest("[data-linked-pr]");
     if(linkedPr && drawer){
-      const repo = drawer.repo, opener = drawerOpener;
+      const repo = linkedPr.getAttribute("data-linked-repo") || drawer.repo, opener = drawerOpener;
       openDrawer(repo, linkedPr.getAttribute("data-linked-pr"), opener); return;
     }
     const logBtn = e.target.closest("[data-run-id]");

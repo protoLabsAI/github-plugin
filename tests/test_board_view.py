@@ -927,6 +927,39 @@ def test_issue_drawer_escapes_sources_and_renders_linked_pr_chips():
         assert forbidden not in PAGE
 
 
+def test_linked_pr_uses_its_repository_and_falls_back_when_missing():
+    _run_drawer_js(
+        r"""
+(async()=>{
+  for(const [repository, expectedRepo] of [
+    [{owner:{login:'other-owner'},name:'other-repo'}, 'other-owner/other-repo'],
+    [{owner:{login:'o'},name:'n'}, 'o/n'],
+    [undefined, 'o/n'], [null, 'o/n'], [{}, 'o/n'],
+    [{owner:{login:'other-owner'}}, 'o/n'],
+  ]){
+    openIssueDrawer('o/n','12',element('issue-row'));
+    await reply(latest(),{number:12,closedByPullRequestsReferences:[{number:34,repository}]});
+    // Read the rendered chip's attributes so both rendering and delegation are exercised.
+    const html = element('drawer-body').innerHTML;
+    const attrs = Object.fromEntries(Array.from(html.matchAll(/(data-linked-[\w-]+)="([^"]*)"/g),
+      match => [match[1],match[2]]));
+    assert.equal(attrs['data-linked-pr'],'34');
+    bodyClick(attrs);
+    assert.equal(drawer.repo,expectedRepo);
+    assert.equal(drawer.mode,'pr'); assert.equal(drawer.tab,'overview');
+    assert.equal(timers.size,1);
+    assert.equal(requests[latest()].path,
+      '/api/plugins/github/detail/pr?repo='+encodeURIComponent(expectedRepo)+'&number=34');
+    closeDrawer();
+  }
+  const html = issueOverview({closedByPullRequestsReferences:[{number:34,
+    repository:{owner:{login:'evil"<owner'},name:'repo">'}}]});
+  assert.ok(html.includes('data-linked-repo="evil&quot;&lt;owner/repo&quot;&gt;"'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
 def test_issue_drawer_interactions_open_tabs_linked_prs_and_missing_fields():
     """r1-r4 (dynamic) — plain vs modified click, Overview + Comments on one fenced poller, the
     header state/stateReason pill, the comment count, a linked-PR chip switching to PR mode, and
