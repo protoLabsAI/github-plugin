@@ -226,39 +226,48 @@ def _bounded_body(header: str, body: str, body_max_chars: int) -> str:
     return result
 
 
+def is_status_context(check: dict) -> bool:
+    return check.get("__typename") == "StatusContext" or ("state" in check and "status" not in check)
+
+
+def classify_check(check: dict) -> str:
+    """Shared classification for tool summaries and drawer checks."""
+    if is_status_context(check):
+        state = str(check.get("state") or "").upper()
+        return "pass" if state == "SUCCESS" else "fail" if state in _CHECK_FAIL else "pending"
+    status = str(check.get("status") or "").upper()
+    conclusion = str(check.get("conclusion") or "").upper()
+    if status and status != "COMPLETED":
+        return "pending"
+    if conclusion == "SUCCESS":
+        return "pass"
+    if conclusion in _CHECK_FAIL:
+        return "fail"
+    return "skipped" if conclusion in _CHECK_SKIP else "pending"
+
+
+async def fetch_failure_log(repo: str, run_id: int) -> dict:
+    """Fetch raw failed-step logs; callers choose their own presentation."""
+    rc, out, serr = await run_gh(["run", "view", str(run_id), "--repo", repo, "--log-failed"], timeout=60)
+    if err := check_gh_error(rc, serr, repo=repo):
+        return {"error": err}
+    return {"log": out}
+
+
 def _summarize_checks(rollup) -> str:
     """``N pass / N fail / N pending (/ N skipped) — failing: a, b`` from a PR's
     statusCheckRollup; ``none`` when the commit has no checks."""
     items = dicts(rollup)
     if not items:
         return "none"
-    n_pass = n_fail = n_pending = n_skip = 0
+    counts = {"pass": 0, "fail": 0, "pending": 0, "skipped": 0}
     failing: list[str] = []
     for c in items:
-        name = str(c.get("name") or c.get("context") or "?")
-        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
-            state = str(c.get("state") or "").upper()
-            if state == "SUCCESS":
-                n_pass += 1
-            elif state in _CHECK_FAIL:
-                n_fail += 1
-                failing.append(name)
-            else:  # PENDING / EXPECTED / unknown
-                n_pending += 1
-            continue
-        status = str(c.get("status") or "").upper()
-        conclusion = str(c.get("conclusion") or "").upper()
-        if status and status != "COMPLETED":
-            n_pending += 1
-        elif conclusion == "SUCCESS":
-            n_pass += 1
-        elif conclusion in _CHECK_FAIL:
-            n_fail += 1
-            failing.append(name)
-        elif conclusion in _CHECK_SKIP:
-            n_skip += 1
-        else:
-            n_pending += 1
+        category = classify_check(c)
+        counts[category] += 1
+        if category == "fail":
+            failing.append(str(c.get("name") or c.get("context") or "?"))
+    n_pass, n_fail, n_pending, n_skip = (counts[k] for k in ("pass", "fail", "pending", "skipped"))
     parts = f"{n_pass} pass / {n_fail} fail / {n_pending} pending" + (f" / {n_skip} skipped" if n_skip else "")
     if failing:
         parts += " — failing: " + ", ".join(failing[:10]) + (" …" if len(failing) > 10 else "")
@@ -519,9 +528,10 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         if err := bad_repo(repo):
             return err
         cap = max(5, min(int(max_lines), 80))
-        rc, out, serr = await run_gh(["run", "view", str(run_id), "--repo", repo, "--log-failed"], timeout=60)
-        if gh_err := check_gh_error(rc, serr, repo=repo):
-            return gh_err
+        result = await fetch_failure_log(repo, run_id)
+        if "error" in result:
+            return result["error"]
+        out = result["log"]
         raw = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
         seen: set = set()
         uniq: list[str] = []

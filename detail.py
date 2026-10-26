@@ -18,10 +18,12 @@ never cached, and a caller passes ``fresh=True`` to bypass a live entry.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 
-from .gh_cli import bad_repo, check_gh_error, parse_json, run_gh
+from .gh_cli import bad_repo, check_gh_error, dicts, parse_json, run_gh
 
 # The JSON fields the drawer needs for one PR — the full merge-readiness picture plus
 # the metadata the UI renders (labels / assignees / milestone / review requests /
@@ -124,3 +126,146 @@ async def fetch_pr_detail(repo: str, number: int, fresh: bool = False) -> dict:
         return d
 
     return await cached(("pr", repo, number), _run, fresh=fresh)
+
+
+async def fetch_pr_checks(repo: str, number: int, fresh: bool = False, *, run_id: int | None = None) -> dict:
+    """Normalised rollup, or the last 200 failed-step log lines for an Actions run."""
+    from .read_tools import classify_check, fetch_failure_log, is_status_context
+
+    if err := bad_repo(repo):
+        return {"error": err}
+    if not _positive_int(number):
+        return {"error": "Error: PR number must be a positive integer."}
+    if run_id is not None and not _positive_int(run_id):
+        return {"error": "Error: run_id must be a positive integer."}
+
+    async def _run():
+        if run_id is not None:
+            result = await fetch_failure_log(repo, run_id)
+            if "error" in result:
+                return result
+            return {"log_tail": "\n".join(result["log"].splitlines()[-200:])}
+        rc, out, serr = await run_gh(["pr", "view", str(number), "--repo", repo, "--json", "statusCheckRollup"])
+        if err := check_gh_error(rc, serr, repo=repo):
+            return {"error": err}
+        data, err = parse_json(out, dict)
+        if err:
+            return {"error": err}
+        checks = []
+        summary = dict.fromkeys(("pass", "fail", "pending", "skipped"), 0)
+        for c in dicts(data.get("statusCheckRollup")):
+            category = classify_check(c)
+            summary[category] += 1
+            context = is_status_context(c)
+            url = c.get("targetUrl" if context else "detailsUrl") or None
+            match = re.search(r"/actions/runs/([1-9][0-9]*)(?:[/?#]|$)", url) if isinstance(url, str) else None
+            checks.append(
+                {
+                    "name": c.get("context" if context else "name") or "?",
+                    "workflow": c.get("workflowName") or None,
+                    "status": ("PENDING" if category == "pending" else "COMPLETED") if context else c.get("status"),
+                    "conclusion": (None if category == "pending" else c.get("state"))
+                    if context
+                    else c.get("conclusion"),
+                    "url": url,
+                    "started_at": c.get("createdAt" if context else "startedAt"),
+                    "completed_at": None if context else c.get("completedAt"),
+                    "run_id": int(match[1]) if match and len(match[1]) < 100 else None,
+                }
+            )
+        return {"checks": checks, "summary": summary}
+
+    return await cached(("pr_checks", repo, number, run_id), _run, fresh=fresh)
+
+
+def _diff_path(value: str) -> str:
+    """Decode Git's quoted paths (including UTF-8 octal escapes)."""
+    if value.startswith('"') and value.endswith('"'):
+        import ast
+
+        try:
+            return ast.literal_eval("b" + value).decode("utf-8", errors="replace")
+        except (ValueError, SyntaxError):
+            return value[1:-1]
+    return value
+
+
+def _split_diff(diff: str) -> dict:
+    files = []
+    for block in re.split(r"(?m)^(?=diff --git )", diff):
+        if not block.startswith("diff --git "):
+            continue
+        lines = block.splitlines()
+        # Git leaves spaces unquoted; split at the b/ prefix, not whitespace.
+        match = re.match(r'diff --git ("a/.*?"|a/.*?) ("b/.*"|b/.*)$', lines[0])
+        if not match:
+            return {"error": "Error: could not parse diff file header."}
+        old, path = (_diff_path(v)[2:] for v in match.groups())
+        status = "modified"
+        additions = deletions = 0
+        in_hunk = False
+        binary = False
+        for line in lines[1:]:
+            if line.startswith("@@ "):
+                in_hunk = True
+            elif in_hunk:
+                additions += line.startswith("+")
+                deletions += line.startswith("-")
+            elif line.startswith("new file mode "):
+                status = "added"
+            elif line.startswith("deleted file mode "):
+                status = "deleted"
+            elif line.startswith("rename from "):
+                status, old = "renamed", _diff_path(line[len("rename from ") :])
+            elif line.startswith("rename to "):
+                path = _diff_path(line[len("rename to ") :])
+            elif line.startswith(("Binary files ", "GIT binary patch")):
+                binary = True
+        files.append(
+            {
+                "path": path,
+                "old_path": old if status == "renamed" else None,
+                "status": status,
+                "additions": additions,
+                "deletions": deletions,
+                "patch": None,
+                "truncated": not binary and len(block) > 40000,
+                "binary": binary,
+                "_patch": None if binary else block[:40000],
+            }
+        )
+    patches = [f.pop("_patch") for f in files]
+    result = {"files": files, "total_truncated": False}
+    # Include JSON escaping and metadata in the total response budget.
+    remaining = 400000 - len(json.dumps(result))
+    if remaining < 0:
+        return {"error": "Error: diff file metadata exceeds the 400000-character response limit."}
+    exhausted = False
+    for f, patch in zip(files, patches, strict=True):
+        if patch is None:
+            continue
+        cost = len(json.dumps(patch)) - len("null")
+        if exhausted or cost > remaining:
+            exhausted = True
+            f["truncated"] = True
+            result["total_truncated"] = True
+        else:
+            f["patch"] = patch
+            remaining -= cost
+    return result
+
+
+async def fetch_pr_diff(repo: str, number: int, fresh: bool = False) -> dict:
+    """A bounded per-file unified diff, cached alongside other drawer reads."""
+    if err := bad_repo(repo):
+        return {"error": err}
+    if not _positive_int(number):
+        return {"error": "Error: PR number must be a positive integer."}
+
+    async def _run():
+        rc, out, serr = await run_gh(["pr", "diff", str(number), "--repo", repo])
+        if err := check_gh_error(rc, serr, repo=repo):
+            return {"error": err}
+        return _split_diff(out)
+
+    return await cached(("pr_diff", repo, number), _run, fresh=fresh)

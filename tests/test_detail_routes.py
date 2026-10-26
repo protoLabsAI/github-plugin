@@ -229,3 +229,241 @@ async def test_body_at_or_under_cap_is_untouched():
         out = await fetch_pr_detail("o/n", 5)
     assert out["body"] == "## What\nA PR body."
     assert "body_truncated" not in out
+
+
+_CHECKS = [
+    {
+        "__typename": "CheckRun",
+        "name": "unit",
+        "workflowName": "CI",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/o/n/actions/runs/123/job/7",
+        "startedAt": "start",
+        "completedAt": "end",
+    },
+    {
+        "__typename": "StatusContext",
+        "context": "external",
+        "state": "ERROR",
+        "targetUrl": "https://ci.test/1",
+        "createdAt": "created",
+    },
+    {"context": "waiting", "state": "EXPECTED"},
+    {"name": "skip", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+    {"name": "running", "status": "IN_PROGRESS", "conclusion": "SUCCESS"},
+]
+
+
+def test_checks_route_normalizes_both_shapes():
+    fake = AsyncMock(return_value=(0, json.dumps({"statusCheckRollup": _CHECKS}), ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        data = (
+            TestClient(_app()).get("/api/plugins/github/detail/pr/checks", params={"repo": "o/n", "number": 5}).json()
+        )
+    assert data["summary"] == {"pass": 1, "fail": 1, "pending": 2, "skipped": 1}
+    assert data["checks"][0] == {
+        "name": "unit",
+        "workflow": "CI",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "url": _CHECKS[0]["detailsUrl"],
+        "started_at": "start",
+        "completed_at": "end",
+        "run_id": 123,
+    }
+    assert data["checks"][1] == {
+        "name": "external",
+        "workflow": None,
+        "status": "COMPLETED",
+        "conclusion": "ERROR",
+        "url": "https://ci.test/1",
+        "started_at": "created",
+        "completed_at": None,
+        "run_id": None,
+    }
+    fake.assert_awaited_once_with(["pr", "view", "5", "--repo", "o/n", "--json", "statusCheckRollup"])
+
+
+def test_failure_log_route_uses_shared_fetcher():
+    fake = AsyncMock(return_value=(0, "\n".join(f"line {i}" for i in range(250)), ""))
+    with patch("ghplugin.read_tools.run_gh", fake):
+        client = TestClient(_app())
+        data = client.get(
+            "/api/plugins/github/detail/pr/checks", params={"repo": "o/n", "number": 5, "run_id": 99}
+        ).json()
+    assert data == {"log_tail": "\n".join(f"line {i}" for i in range(50, 250))}
+    fake.assert_awaited_once_with(["run", "view", "99", "--repo", "o/n", "--log-failed"], timeout=60)
+
+
+_DIFF = """diff --git a/new.txt b/new.txt
+new file mode 100644
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1 @@
++new
+ diff --git is context, not a file header
+ diff --git is context too
+diff --git a/edit.txt b/edit.txt
+index 123..456 100644
+--- a/edit.txt
++++ b/edit.txt
+@@ -1 +1 @@
+-old
++new
++++literal pluses
+---literal minuses
+diff --git a/gone.txt b/gone.txt
+deleted file mode 100644
+--- a/gone.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-old
+diff --git a/old name.txt b/new name.txt
+similarity index 100%
+rename from old name.txt
+rename to new name.txt
+diff --git a/image.png b/image.png
+index 123..456 100644
+Binary files a/image.png and b/image.png differ
+"""
+
+
+def test_diff_route_file_shapes_and_argv():
+    fake = AsyncMock(return_value=(0, _DIFF, ""))
+    with patch("ghplugin.detail.run_gh", fake):
+        data = TestClient(_app()).get("/api/plugins/github/detail/pr/diff", params={"repo": "o/n", "number": 5}).json()
+    files = data["files"]
+    assert [(f["path"], f["status"], f["additions"], f["deletions"]) for f in files] == [
+        ("new.txt", "added", 1, 0),
+        ("edit.txt", "modified", 2, 2),
+        ("gone.txt", "deleted", 0, 1),
+        ("new name.txt", "renamed", 0, 0),
+        ("image.png", "modified", 0, 0),
+    ]
+    assert files[3]["old_path"] == "old name.txt"
+    assert files[0]["old_path"] is None
+    assert files[4]["binary"] and files[4]["patch"] is None
+    assert not data["total_truncated"]
+    assert files[0]["patch"].startswith("diff --git")
+    fake.assert_awaited_once_with(["pr", "diff", "5", "--repo", "o/n"])
+
+
+async def test_diff_caps_include_json_escaping_and_preserve_counts():
+    from ghplugin.detail import fetch_pr_diff
+
+    diff = "".join(f"diff --git a/f{i} b/f{i}\n@@ -0,0 +1 @@\n+" + '"' * 45000 + "\n" for i in range(12))
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, diff, ""))):
+        data = await fetch_pr_diff("o/n", 5)
+    assert len(json.dumps(data)) <= 400000
+    assert len(data["files"]) == 12
+    assert data["total_truncated"]
+    assert len(data["files"][0]["patch"]) == 40000
+    assert data["files"][-1]["patch"] is None
+    assert all(f["truncated"] and f["additions"] == 1 for f in data["files"])
+
+
+@pytest.mark.parametrize("route,extra", [("checks", {}), ("checks", {"run_id": 2}), ("diff", {})])
+@pytest.mark.parametrize("invalid", [{"repo": "bad"}, {"number": 0}, {"number": "bad"}, {"number": -2}])
+def test_new_route_validation(route, extra, invalid):
+    with (
+        patch("ghplugin.detail.run_gh", AsyncMock()) as diff_gh,
+        patch("ghplugin.read_tools.run_gh", AsyncMock()) as log_gh,
+    ):
+        data = (
+            TestClient(_app())
+            .get(f"/api/plugins/github/detail/pr/{route}", params={"repo": "o/n", "number": 5, **extra, **invalid})
+            .json()
+        )
+    assert "error" in data
+    diff_gh.assert_not_called()
+    log_gh.assert_not_called()
+
+
+@pytest.mark.parametrize("run_id", [0, -1, "bad", "", "1.5"])
+def test_bad_run_id(run_id):
+    with patch("ghplugin.read_tools.run_gh", AsyncMock()) as fake:
+        data = (
+            TestClient(_app())
+            .get("/api/plugins/github/detail/pr/checks", params={"repo": "o/n", "number": 5, "run_id": run_id})
+            .json()
+        )
+    assert "error" in data
+    fake.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "route,extra,output,target",
+    [
+        ("checks", {}, '{"statusCheckRollup": []}', "ghplugin.detail.run_gh"),
+        ("checks", {"run_id": 2}, "log", "ghplugin.read_tools.run_gh"),
+        ("diff", {}, _DIFF, "ghplugin.detail.run_gh"),
+    ],
+)
+def test_new_routes_cache_fresh_expiry_and_errors(route, extra, output, target):
+    fake = AsyncMock(return_value=(0, output, ""))
+    clock = [100.0]
+    params = {"repo": "o/n", "number": 5, **extra}
+    with patch(target, fake), patch("ghplugin.detail._now", lambda: clock[0]):
+        client = TestClient(_app())
+        url = f"/api/plugins/github/detail/pr/{route}"
+        assert client.get(url, params=params).json() == client.get(url, params=params).json()
+        assert fake.call_count == 1
+        client.get(url, params={**params, "fresh": 1})
+        assert fake.call_count == 2
+        clock[0] += 16
+        client.get(url, params=params)
+        assert fake.call_count == 3
+        clear_cache()
+        fake.return_value = (1, "", "HTTP 404: Not Found")
+        for _ in range(2):
+            assert "404" in client.get(url, params=params).json()["error"]
+        assert fake.call_count == 5
+
+
+@pytest.mark.parametrize("rollup", [None, [], [None, 1, "bad"], {}])
+async def test_malformed_checks_do_not_raise(rollup):
+    from ghplugin.detail import fetch_pr_checks
+
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, json.dumps({"statusCheckRollup": rollup}), ""))):
+        assert (await fetch_pr_checks("o/n", 5))["checks"] == []
+
+
+@pytest.mark.parametrize("size,truncated", [(39999, False), (40000, False), (40001, True)])
+async def test_patch_cap_boundary(size, truncated):
+    from ghplugin.detail import fetch_pr_diff
+
+    header = "diff --git a/f b/f\n@@ -0,0 +1 @@\n+"
+    diff = header + "x" * (size - len(header))
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, diff, ""))):
+        data = await fetch_pr_diff("o/n", 5)
+    assert len(data["files"][0]["patch"]) == min(size, 40000)
+    assert data["files"][0]["truncated"] is truncated
+    assert not data["total_truncated"]
+
+
+@pytest.mark.parametrize("out", ["[]", "null", "invalid"])
+async def test_checks_invalid_json_is_error(out):
+    from ghplugin.detail import fetch_pr_checks
+
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, out, ""))):
+        assert "error" in await fetch_pr_checks("o/n", 5)
+
+
+async def test_failure_tool_keeps_error_filtering_with_shared_fetcher():
+    from ghplugin.read_tools import get_read_tools
+
+    tool = next(t for t in get_read_tools() if t.name == "github_run_failure")
+    log = "step\tsetup\nstep\terror: bad\nstep\terror: bad\nstep\tdone\n"
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, log, ""))):
+        result = await tool.ainvoke({"repo": "o/n", "run_id": 9})
+    assert result == "o/n run 9 — failure log (1 line(s)):\nerror: bad"
+
+
+async def test_quoted_diff_paths():
+    from ghplugin.detail import fetch_pr_diff
+
+    diff = 'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\n@@ -1 +1 @@\n-old\n+new\n'
+    with patch("ghplugin.detail.run_gh", AsyncMock(return_value=(0, diff, ""))):
+        data = await fetch_pr_diff("o/n", 5)
+    assert data["files"][0]["path"] == "café.txt"
