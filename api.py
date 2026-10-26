@@ -198,6 +198,15 @@ def build_data_router(cfg, registry=None):
     async def _prs(repo: str, state: str = "open") -> dict:
         return await fetch_prs(repo, state)
 
+    @router.get("/detail/pr")
+    async def _detail_pr(repo: str, number: int, fresh: int = 0) -> dict:
+        """One PR's full detail object (``detail.fetch_pr_detail``) — read-only; memoised
+        a few seconds (``fresh=1`` bypasses the cache). A bad repo / non-positive number
+        is ``{"error"}`` without touching `gh`."""
+        from .detail import fetch_pr_detail
+
+        return await fetch_pr_detail(repo, number, fresh=bool(fresh))
+
     @router.post("/issue")
     async def _create_issue(body: dict = Body(...)) -> dict:
         resolved = await _resolved()
