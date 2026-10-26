@@ -291,7 +291,8 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
     @tool
     async def github_get_pr(number: int, repo: str = "", body_max_chars: int = 0) -> str:
         """Fetch a GitHub pull request — the merge-readiness picture in one call: title,
-        state, draft?, author, branch, review decision, mergeability + merge state, a
+        state, draft?, author, branch + head commit sha (and the merge commit once merged),
+        review decision, mergeability + merge state, a
         checks summary (N pass / N fail / N pending + the failing check names), the
         reviews (author, verdict, excerpt), changed files, and the body.
 
@@ -314,7 +315,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
                 repo,
                 "--json",
                 "number,title,state,isDraft,author,body,additions,deletions,files,url,headRefName,baseRefName,"
-                "reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,latestReviews",
+                "reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,latestReviews,headRefOid,mergeCommit",
             ]
         )
         if gh_err := check_gh_error(rc, serr, repo=repo):
@@ -339,9 +340,14 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         ]
         if len(reviews) > len(review_lines):
             review_lines.append(f"  … {len(reviews) - len(review_lines)} more review(s) (older / superseded)")
+        # The squash/merge commit a merged PR landed as — what a release tags.
+        mc = d.get("mergeCommit")
+        merge_sha = str(mc.get("oid") or "") if isinstance(mc, dict) else ""
+        merge_line = f"merge commit: {merge_sha}\n" if merge_sha else ""
         text = (
             f"PR #{d.get('number')} [{d.get('state')}]{draft} {d.get('title')}\n"
-            f"branch: {d.get('headRefName', '?')} -> {d.get('baseRefName', '?')}\n"
+            f"branch: {d.get('headRefName', '?')} -> {d.get('baseRefName', '?')} | head: {d.get('headRefOid') or '?'}\n"
+            f"{merge_line}"
             f"by {_login(d.get('author'))} | "
             f"+{d.get('additions', 0)}/-{d.get('deletions', 0)} | {d.get('url')}\n"
             f"review decision: {d.get('reviewDecision') or 'none yet'} | "

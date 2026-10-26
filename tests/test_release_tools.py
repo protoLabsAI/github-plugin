@@ -269,3 +269,22 @@ async def test_merge_sha_must_be_full_and_cannot_delete_the_branch():
             {"repo": "o/n", "number": 1, "sha": SHA, "delete_branch": True, "confirm": True}
         )
     fake.assert_not_called()
+
+
+async def test_get_pr_shows_the_head_sha_and_the_merge_commit():
+    """A release merges pinned to the head it verified and tags the merge commit — both
+    have to be readable from github_get_pr."""
+    from ghplugin.read_tools import get_read_tools
+
+    pr = {
+        "number": 9, "title": "chore: release v1.4.0", "state": "MERGED", "headRefName": "prepare-release/v1.4.0",
+        "baseRefName": "main", "headRefOid": SHA, "mergeCommit": {"oid": TAG_OBJ},
+    }  # fmt: skip
+    tool = {t.name: t for t in get_read_tools()}["github_get_pr"]
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, json.dumps(pr), ""))) as fake:
+        out = await tool.ainvoke({"repo": "o/n", "number": 9})
+    assert f"head: {SHA}" in out and f"merge commit: {TAG_OBJ}" in out
+    assert "headRefOid,mergeCommit" in fake.call_args.args[0][fake.call_args.args[0].index("--json") + 1]
+    pr.pop("mergeCommit")
+    with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, json.dumps(pr), ""))):
+        assert "merge commit" not in await tool.ainvoke({"repo": "o/n", "number": 9})
