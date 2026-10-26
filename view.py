@@ -105,6 +105,8 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .tab[aria-selected="true"]{background:var(--pl-color-bg);color:var(--pl-color-fg);font-weight:600}
   select{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
     border-radius:var(--pl-radius,8px);padding:4px 6px;font-size:12px;max-width:220px}
+  #search{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
+    border-radius:var(--pl-radius,8px);padding:4px 7px;font-size:12px;min-width:120px;max-width:220px;flex:1 1 140px}
   .ico{width:1em;height:1em;flex:none;vertical-align:-0.15em}
   #refresh{display:inline-flex;align-items:center;justify-content:center;padding:4px 7px;color:var(--pl-color-fg-muted)}
   .spacer{flex:1}
@@ -120,6 +122,10 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .meta{margin-top:3px;font-size:11px;color:var(--pl-color-fg-muted);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
   .cmt{display:inline-flex;align-items:center;gap:3px}
   .pill{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--pl-color-border)}
+  /* CI rollup chip on PR rows (bd-nm78.8) — ✓/✗/● tinted from the list dot palette. */
+  .ci{font-weight:700;line-height:1;font-size:12px}
+  .ci-passing{color:#3fb950}.ci-failing{color:#f85149}.ci-pending{color:#d29922}
+  .more{padding:10px 12px;text-align:center}
   .empty,.hint{padding:24px 14px;text-align:center;color:var(--pl-color-fg-muted)}
   #scrim{display:none;position:fixed;inset:0;background:#0006;z-index:10}
   #scrim.open{display:block}
@@ -188,6 +194,7 @@ __SETUP_CSS__
       <button class="tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests">PRs</button>
     </div>
     <select id="state" title="State"><option value="open">Open</option><option value="closed">Closed</option><option value="all">All</option></select>
+    <input id="search" type="search" placeholder="Search…" title="Search (Enter to run, Esc to clear)" aria-label="Search" autocomplete="off" />
     <span class="spacer"></span>
     <button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>
   </div>
@@ -234,7 +241,7 @@ __SETUP_CSS__
     refresh: svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
   };
 
-  function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); load(); }
+  function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); reload(); }
   function labelPills(labels){ return (labels||[]).slice(0,5).map(l => '<span class="pill">'+esc(l.name||l)+'</span>').join(" "); }
 
   function issueRow(it, repo){
@@ -250,6 +257,18 @@ __SETUP_CSS__
       + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
       + (cc?('<span class="cmt" title="'+esc(cc)+' comment'+(cc===1?'':'s')+'">'+ICON.comment+esc(cc)+'</span>'):'')+' '+labelPills(it.labels)+'</div></a>';
   }
+  // The CI rollup chip for a PR row (bd-nm78.8): ✓ passing / ✗ failing / ● pending, with a
+  // "<fail> of <total> checks <state>" tooltip. `none` (no checks) renders nothing.
+  const CI_SYM = {passing:"✓", failing:"✗", pending:"●"};
+  function checksChip(checks){
+    if(!checks || !CI_SYM[checks.state]) return "";
+    const total = Number(checks.total)||0, fail = Number(checks.fail)||0;
+    const noun = "check"+(total===1?"":"s");
+    const tip = checks.state==="failing" ? (fail+" of "+total+" "+noun+" failing")
+      : checks.state==="pending" ? (total+" "+noun+" pending")
+      : (total+" "+noun+" passing");
+    return '<span class="ci ci-'+esc(checks.state)+'" title="'+esc(tip)+'">'+CI_SYM[checks.state]+'</span>';
+  }
   function prRow(it, repo){
     const merged = (it.state||"").toLowerCase()==="merged", draft = !!it.isDraft;
     const review = it.reviewDecision ? String(it.reviewDecision).toLowerCase().replace(/_/g," ") : "";
@@ -257,6 +276,7 @@ __SETUP_CSS__
       + '<div class="top"><span class="dot '+(merged?"merged":(draft?"draft":"open"))+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
       + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
+      + checksChip(it.checks)
       + (it.headRefName?('<span class="pill">'+esc(it.headRefName)+'</span>'):'')
       + (draft?'<span class="pill">draft</span>':'')+(review?('<span class="pill">'+esc(review)+'</span>'):'')
       + ' '+labelPills(it.labels)+'</div></a>';
@@ -671,23 +691,43 @@ __SETUP_CSS__
   });
 
   // A monotonic token so an in-flight load() whose fetch resolves AFTER a newer load()
-  // started (rapid tab/filter clicks, or any double-trigger) drops its stale result instead
-  // of clobbering the fresh list — no thrash.
+  // started (rapid tab/filter/search clicks, or any double-trigger) drops its stale result
+  // instead of clobbering the fresh list — no thrash.
   let loadSeq = 0;
-  async function load(){
+  // Load-more (bd-nm78.8): the page starts at 30 and grows by 30 up to 100. A fresh load
+  // (tab / repo / state / search / refresh) resets it via reload(); "Load more" bumps it.
+  const PAGE_STEP = 30, MAX_PAGE = 100;
+  let pageLimit = PAGE_STEP;
+  function listPath(repo){
+    const q = ($("search").value || "").trim();
+    return (tab==="issues"?"/api/plugins/github/issues":"/api/plugins/github/prs")
+      + "?repo="+encodeURIComponent(repo)+"&state="+encodeURIComponent($("state").value)
+      + "&limit="+pageLimit + (q ? "&search="+encodeURIComponent(q) : "");
+  }
+  function reload(){ pageLimit = PAGE_STEP; load(false); }
+  async function load(more){
     const my = ++loadSeq;
     const repo = $("repo").value, list = $("list");
     if(!repo){ list.innerHTML = '<div class="hint">No repositories configured. Add some under <b>Settings ▸ GitHub</b> (github.repos).</div>'; return; }
-    list.innerHTML = '<div class="hint">Loading…</div>';
-    const path = (tab==="issues"?"/api/plugins/github/issues":"/api/plugins/github/prs")
-      + "?repo="+encodeURIComponent(repo)+"&state="+encodeURIComponent($("state").value);
+    const keepTop = more ? list.scrollTop : 0;  // "Load more" re-renders the whole list — keep the scroll
+    if(!more) list.innerHTML = '<div class="hint">Loading…</div>';
     try {
-      const data = await kit.apiFetch(path).then(r => r.json());
+      const data = await kit.apiFetch(listPath(repo)).then(r => r.json());
       if(my !== loadSeq) return;  // a newer load() superseded this one — drop the stale result
       if(data.error){ list.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
       const items = data.items||[];
       if(!items.length){ list.innerHTML = '<div class="empty">No '+tab+' for this filter.</div>'; return; }
-      list.innerHTML = items.map(it => tab==="issues" ? issueRow(it, repo) : prRow(it, repo)).join("");
+      let html = items.map(it => tab==="issues" ? issueRow(it, repo) : prRow(it, repo)).join("");
+      // A full page means there may be more. Grow until 100, then stop with a refine hint.
+      if(pageLimit >= MAX_PAGE){
+        html += '<div class="hint">Showing first 100 — refine with search</div>';
+      } else if(items.length >= pageLimit){
+        html += '<div class="more"><button class="pl-btn pl-btn--sm" id="more" type="button">Load more</button></div>';
+      }
+      list.innerHTML = html;
+      list.scrollTop = keepTop;
+      const mb = $("more");
+      if(mb) mb.onclick = () => { pageLimit = Math.min(pageLimit + PAGE_STEP, MAX_PAGE); load(true); };
     } catch(e){ if(my===loadSeq) list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
   }
 
@@ -708,7 +748,14 @@ __SETUP_JS__
   $("refresh").innerHTML = ICON.refresh;
   $("t-issues").onclick = () => setTab("issues");
   $("t-prs").onclick = () => setTab("prs");
-  $("repo").onchange = load; $("state").onchange = load; $("refresh").onclick = load;
+  $("repo").onchange = reload; $("state").onchange = reload; $("refresh").onclick = reload;
+  // Search: debounced 300ms; Enter runs it now; Esc clears the box (it only has focus here).
+  let searchTimer = null;
+  $("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(reload, 300); });
+  $("search").addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){ e.preventDefault(); clearTimeout(searchTimer); reload(); }
+    else if(e.key === "Escape"){ e.preventDefault(); if($("search").value){ $("search").value = ""; clearTimeout(searchTimer); reload(); } }
+  });
   // Boot via the kit so it runs after the theme/auth handshake (the fallback kit calls it
   // immediately). initPluginView's callback fires on the initial init AND every re-theme, so
   // boot() itself is guarded (booted) to run once — that's what actually kills the mount

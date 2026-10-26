@@ -75,6 +75,108 @@ def test_gh_available_is_bool():
     assert isinstance(gh_available(), bool)
 
 
+# --- bd-nm78.8: search, limit, and the opt-in CI rollup ----------------------
+
+
+async def test_fetch_issues_and_prs_pass_search_as_one_argv_element():
+    """r1 — the query reaches `gh … list --search <q>` as ONE argv element (never shell-joined),
+    so a multi-word query with a leading qualifier stays a single argument."""
+    fake = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.api.run_gh", fake):
+        await fetch_issues("o/n", search="is:open label:bug crash")
+        iargs = fake.call_args.args[0]
+        await fetch_prs("o/n", search="review:required status:success")
+        pargs = fake.call_args.args[0]
+    assert iargs.count("--search") == 1 and iargs[iargs.index("--search") + 1] == "is:open label:bug crash"
+    assert pargs.count("--search") == 1 and pargs[pargs.index("--search") + 1] == "review:required status:success"
+
+
+async def test_search_is_stripped_capped_and_omitted_when_blank():
+    """r1 — the query is trimmed and capped at 256 chars; a blank/whitespace query adds no flag."""
+    fake = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.api.run_gh", fake):
+        await fetch_prs("o/n", search="   " + "x" * 300 + "   ")
+        capped_args = fake.call_args.args[0]
+        await fetch_issues("o/n", search="   ")
+        blank_args = fake.call_args.args[0]
+    assert capped_args[capped_args.index("--search") + 1] == "x" * 256  # stripped then capped
+    assert "--search" not in blank_args  # a blank query is no search at all
+
+
+async def test_limit_is_clamped_1_to_100():
+    fake = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.api.run_gh", fake):
+        await fetch_issues("o/n", limit=9999)
+        assert fake.call_args.args[0][fake.call_args.args[0].index("--limit") + 1] == "100"
+        await fetch_prs("o/n", limit=0)
+        assert fake.call_args.args[0][fake.call_args.args[0].index("--limit") + 1] == "1"
+
+
+async def test_fetch_prs_with_checks_adds_field_and_compacts_the_rollup():
+    """r3 — with_checks=True asks for statusCheckRollup and replaces each raw rollup with a
+    compact {state, fail, total}, classifying failing/pending/passing/none like the tool."""
+    rows = [
+        {"number": 1, "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]},
+        {
+            "number": 2,
+            "statusCheckRollup": [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "COMPLETED", "conclusion": "FAILURE"},
+                {"state": "PENDING"},  # StatusContext shape
+            ],
+        },
+        {"number": 3, "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": ""}]},
+        {"number": 4, "statusCheckRollup": []},
+    ]
+    import json
+
+    fake = AsyncMock(return_value=(0, json.dumps(rows), ""))
+    with patch("ghplugin.api.run_gh", fake):
+        out = await fetch_prs("o/n", with_checks=True)
+    assert "statusCheckRollup" in fake.call_args.args[0][fake.call_args.args[0].index("--json") + 1]
+    items = {it["number"]: it["checks"] for it in out["items"]}
+    assert "statusCheckRollup" not in out["items"][0]  # raw rollup replaced, not kept
+    assert items[1] == {"state": "passing", "fail": 0, "total": 1}
+    assert items[2] == {"state": "failing", "fail": 1, "total": 3}  # any fail ⇒ failing
+    assert items[3] == {"state": "pending", "fail": 0, "total": 1}  # running, nothing failed
+    assert items[4] == {"state": "none", "fail": 0, "total": 0}  # no checks at all
+
+
+async def test_fetch_prs_without_checks_keeps_argv_and_output_unchanged():
+    """r3 — the default (github_list_prs) path never asks for statusCheckRollup and never adds a
+    `checks` key, so the tool's argv and output are byte-for-byte what they were."""
+    fake = AsyncMock(return_value=(0, '[{"number":5,"title":"PR","isDraft":true}]', ""))
+    with patch("ghplugin.api.run_gh", fake):
+        out = await fetch_prs("o/n")
+    json_fields = fake.call_args.args[0][fake.call_args.args[0].index("--json") + 1]
+    assert "statusCheckRollup" not in json_fields
+    assert "--search" not in fake.call_args.args[0]
+    assert out == {"items": [{"number": 5, "title": "PR", "isDraft": True}]}  # no `checks` key
+
+
+def test_issues_route_passes_search_and_limit():
+    """r1/r2 — the /issues route forwards search (single --search element) and the clamped limit."""
+    fake = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.api.run_gh", fake):
+        TestClient(_app()).get(
+            "/api/plugins/github/issues", params={"repo": "o/n", "search": "needle here", "limit": 200}
+        )
+    args = fake.call_args.args[0]
+    assert args[args.index("--search") + 1] == "needle here"  # one argv element
+    assert args[args.index("--limit") + 1] == "100"  # clamped
+
+
+def test_prs_route_turns_on_checks_and_passes_search_and_limit():
+    """r2/r3 — the /prs route asks for statusCheckRollup (the chip), forwards search + limit."""
+    fake = AsyncMock(return_value=(0, "[]", ""))
+    with patch("ghplugin.api.run_gh", fake):
+        TestClient(_app()).get("/api/plugins/github/prs", params={"repo": "o/n", "search": "wip", "limit": 60})
+    args = fake.call_args.args[0]
+    assert "statusCheckRollup" in args[args.index("--json") + 1]
+    assert args[args.index("--search") + 1] == "wip"
+    assert args[args.index("--limit") + 1] == "60"
+
+
 # --- routes (TestClient) -----------------------------------------------------
 
 
@@ -525,6 +627,11 @@ const document = {hidden: false, getElementById: element, addEventListener(k,v){
 const kit = {apiFetch(path){return new Promise((resolve,reject)=>requests.push({path,resolve,reject}));}};
 const setInterval = (fn,ms) => {lastIntervalMs = ms; timers.set(++timerId,fn); return timerId;};
 const clearInterval = id => timers.delete(id);
+// Controllable debounce timers (search box): setTimeout never auto-fires — runTimeouts() does.
+let timeoutId = 0; const timeouts = new Map();
+const setTimeout = (fn) => {timeouts.set(++timeoutId,fn); return timeoutId;};
+const clearTimeout = id => timeouts.delete(id);
+const runTimeouts = () => {const fns = [...timeouts.values()]; timeouts.clear(); fns.forEach(fn => fn());};
 const flush = async()=>{await Promise.resolve(); await Promise.resolve(); await Promise.resolve();};
 const reply = async(index,data,ok=true)=>{requests[index].resolve({ok,json:async()=>data}); await flush();};
 const latest = () => requests.length - 1;
@@ -1062,6 +1169,133 @@ def test_issue_drawer_interactions_open_tabs_linked_prs_and_missing_fields():
   assert.ok(issueRow(issue,'o/n').includes('data-repo="o/n"'));
   assert.ok(issueRow(issue,'o/n').includes('target="_blank"'));
   assert.ok(!issueRow(issue,'o/n').includes('data-pr='));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+# --- bd-nm78.8: search box, load-more, and the CI chip (view) ----------------
+
+
+def test_board_has_debounced_search_box_with_enter_and_esc():
+    """r1 (static) — the bar carries a search input, debounced 300ms, Enter runs it now, Esc
+    clears it; the result still rides the existing loadSeq fence (drop-stale)."""
+    from ghplugin.view import PAGE
+
+    assert 'id="search"' in PAGE and 'type="search"' in PAGE
+    assert "setTimeout(reload, 300)" in PAGE  # 300ms debounce
+    assert 'if(e.key === "Enter")' in PAGE and 'e.key === "Escape"' in PAGE
+    assert '$("search").value = ""' in PAGE  # Esc clears the box
+    assert 'encodeURIComponent($("search").value' not in PAGE  # trimmed before it's sent
+    assert "&search=" in PAGE and "let loadSeq = 0;" in PAGE  # the stale-drop fence is unchanged
+
+
+def test_board_has_load_more_up_to_100_with_refine_hint():
+    """r2 (static) — the page starts at 30, grows by 30 to a 100 ceiling, and swaps Load more
+    for a refine hint at the cap; the limit rides the query string."""
+    from ghplugin.view import PAGE
+
+    assert "const PAGE_STEP = 30, MAX_PAGE = 100;" in PAGE
+    assert "pageLimit = PAGE_STEP" in PAGE  # starts/resets at 30
+    assert "Load more" in PAGE
+    assert "Showing first 100 — refine with search" in PAGE
+    assert "&limit=" in PAGE
+    assert "list.scrollTop = keepTop" in PAGE  # scroll kept across a Load more
+
+
+def test_pr_rows_render_a_ci_chip_passed_through_esc():
+    """r4/r5 (static) — PR rows render a ✓/✗/● chip from the compact `checks` summary, with
+    an escaped tooltip; a `none` rollup renders nothing."""
+    from ghplugin.view import PAGE
+
+    assert "function checksChip(checks)" in PAGE
+    assert "checksChip(it.checks)" in PAGE  # rendered on PR rows
+    assert 'CI_SYM = {passing:"✓", failing:"✗", pending:"●"}' in PAGE
+    assert 'of "+total+" "+noun+" failing' in PAGE  # the "2 of 9 checks failing" tooltip
+    assert "esc(tip)" in PAGE and "esc(checks.state)" in PAGE  # chip strings are escaped
+    assert ".ci-passing{color:#3fb950}" in PAGE and ".ci-failing{color:#f85149}" in PAGE
+
+
+def test_load_more_grows_to_100_keeps_scroll_and_renders_ci_chip():
+    """r2/r4 (dynamic) — a full page shows Load more; each click bumps the limit by 30, keeps the
+    scroll, and the list stops at 100 with the refine hint. PR rows carry the CI chip."""
+    _run_drawer_js(
+        r"""
+(async()=>{
+  element('repo').value='o/n'; element('state').value='open'; element('search').value='';
+  const mk = n => Array.from({length:n},(_,i)=>({number:i+1,title:'PR'+i,state:'OPEN',
+    author:{login:'kj'},url:'https://github.com/o/n/pull/'+(i+1),
+    checks:{state: i===0?'failing':'passing', total:9, fail: i===0?2:0}}));
+  setTab('prs');  // reload(): pageLimit resets to 30 and fires one request
+  assert.ok(requests[latest()].path.startsWith('/api/plugins/github/prs?repo=o%2Fn&state=open&limit=30'));
+  await reply(latest(), {items: mk(30)});
+  let html = element('list').innerHTML;
+  assert.ok(html.includes('Load more'));               // a full page ⇒ there may be more
+  assert.ok(html.includes('ci-failing') && html.includes('2 of 9 checks failing'));  // CI chip + tooltip
+  assert.ok(html.includes('ci-passing'));
+  // Click Load more — limit → 60, scroll preserved, re-fetched through the fence.
+  element('list').scrollTop = 140;
+  element('more').onclick();
+  assert.ok(requests[latest()].path.includes('limit=60'));
+  await reply(latest(), {items: mk(60)});
+  assert.equal(element('list').scrollTop, 140);         // scroll kept
+  assert.ok(element('list').innerHTML.includes('Load more'));
+  element('more').onclick();                            // 60 → 90
+  assert.ok(requests[latest()].path.includes('limit=90'));
+  await reply(latest(), {items: mk(90)});
+  element('more').onclick();                            // 90 → min(120,100)=100
+  assert.ok(requests[latest()].path.includes('limit=100'));
+  await reply(latest(), {items: mk(100)});
+  html = element('list').innerHTML;
+  assert.ok(html.includes('Showing first 100 — refine with search'));
+  assert.ok(!html.includes('Load more'));              // no more growth past the ceiling
+  // A short page (fewer than the limit) shows no Load more at all.
+  reload();  // pageLimit back to 30
+  await reply(latest(), {items: mk(10)});
+  assert.ok(!element('list').innerHTML.includes('Load more'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+def test_search_box_debounces_runs_on_enter_and_clears_on_esc():
+    """r1 (dynamic) — typing debounces (one request after the timer), Enter runs immediately and
+    cancels the pending debounce, Esc clears a non-empty box and reloads without the search param."""
+    _run_drawer_js(
+        r"""
+(async()=>{
+  element('repo').value='o/n'; element('state').value='open'; element('search').value='';
+  setTab('issues');
+  await reply(latest(), {items: []});
+  // Typing schedules a debounced reload — nothing fires until the 300ms timer runs.
+  const base = requests.length;
+  element('search').value = 'crash bug';
+  element('search').handlers.input();
+  assert.equal(requests.length, base);   // debounced, not yet sent
+  runTimeouts();                         // the 300ms timer fires reload()
+  assert.equal(requests.length, base+1);
+  assert.ok(requests[latest()].path.includes('&search=crash%20bug'));  // one encoded param
+  assert.ok(requests[latest()].path.includes('limit=30'));             // search resets to page 1
+  await reply(latest(), {items: []});
+  // Enter runs immediately AND cancels any pending debounce (no double fetch).
+  element('search').value = 'needle';
+  element('search').handlers.input();    // schedules a timer…
+  element('search').handlers.keydown({key:'Enter',preventDefault(){}});  // …Enter supersedes it
+  assert.ok(requests[latest()].path.includes('&search=needle'));
+  const afterEnter = requests.length;
+  runTimeouts();                         // the cancelled debounce must NOT fire again
+  assert.equal(requests.length, afterEnter);
+  await reply(latest(), {items: []});
+  // Esc clears a non-empty box and reloads with no search param.
+  element('search').value = 'needle';
+  element('search').handlers.keydown({key:'Escape',preventDefault(){}});
+  assert.equal(element('search').value, '');
+  assert.ok(!requests[latest()].path.includes('search='));
+  await reply(latest(), {items: []});
+  // Esc on an already-empty box is a no-op (no reload).
+  const quiet = requests.length;
+  element('search').handlers.keydown({key:'Escape',preventDefault(){}});
+  assert.equal(requests.length, quiet);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     )

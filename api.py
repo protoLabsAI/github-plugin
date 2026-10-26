@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 
-from .gh_cli import bad_repo, check_gh_error, parse_json, resolve_gh, run_gh
+from .gh_cli import bad_repo, check_gh_error, dicts, parse_json, resolve_gh, run_gh
 
 # The JSON fields we ask `gh` for — kept lean: enough for a board row + the detail link.
 _ISSUE_FIELDS = "number,title,state,author,labels,url,createdAt,comments"
@@ -39,6 +39,7 @@ def gh_available() -> bool:
 
 _PR_STATES = ("open", "closed", "merged", "all")
 _ISSUE_STATES = ("open", "closed", "all")  # issues have no "merged" — `gh issue list --state merged` errors
+_MAX_SEARCH_CHARS = 256
 
 
 def _norm_state(state: str, allowed: tuple[str, ...] = _PR_STATES) -> str | None:
@@ -47,11 +48,44 @@ def _norm_state(state: str, allowed: tuple[str, ...] = _PR_STATES) -> str | None
     return s if s in allowed else None
 
 
-async def fetch_issues(repo: str, state: str = "open", limit: int = 30) -> dict:
+def _search_arg(search: str) -> str:
+    """The trimmed, 256-char-capped search query, or ``""`` when blank. The caller passes
+    it to `gh` as a SINGLE ``--search`` argv element (never shell-joined), so a query with
+    spaces or a leading qualifier (e.g. ``is:open label:bug``) is one argument, not several."""
+    return (search or "").strip()[:_MAX_SEARCH_CHARS]
+
+
+def _compact_checks(rollup) -> dict:
+    """A compact CI summary for a board PR row from a PR's ``statusCheckRollup``, reusing
+    ``read_tools.classify_check`` — the SAME CheckRun/StatusContext classification the
+    ``github_get_pr`` summary and the drawer Checks tab use, so the board can't disagree.
+
+    Returns ``{"state": passing|failing|pending|none, "fail": N, "total": N}``: ``failing``
+    if any check failed, else ``pending`` if any is still running, else ``passing``; ``none``
+    when the head commit has no checks at all."""
+    from .read_tools import classify_check
+
+    items = dicts(rollup)
+    total = len(items)
+    if not total:
+        return {"state": "none", "fail": 0, "total": 0}
+    fail = pending = 0
+    for c in items:
+        category = classify_check(c)
+        if category == "fail":
+            fail += 1
+        elif category == "pending":
+            pending += 1
+    state = "failing" if fail else "pending" if pending else "passing"
+    return {"state": state, "fail": fail, "total": total}
+
+
+async def fetch_issues(repo: str, state: str = "open", limit: int = 30, search: str = "") -> dict:
     """List issues for ``repo`` as ``{"items": [...]}`` (or ``{"error": "..."}``).
 
     Each item is the raw `gh issue list --json` row (number/title/state/author/
     labels/url/createdAt/comments). PRs are excluded — `gh issue list` already omits them.
+    ``search`` (optional) is passed to `gh issue list --search <q>` as a single argv element.
     """
     if err := bad_repo(repo):
         return {"error": err}
@@ -59,21 +93,30 @@ async def fetch_issues(repo: str, state: str = "open", limit: int = 30) -> dict:
     if norm is None:
         return {"error": f"Error: state must be open|closed|all (got {state!r})."}
     capped = max(1, min(int(limit), 100))
-    rc, out, serr = await run_gh(
-        ["issue", "list", "--repo", repo, "--state", norm, "--limit", str(capped), "--json", _ISSUE_FIELDS]
-    )
+    args = ["issue", "list", "--repo", repo, "--state", norm, "--limit", str(capped), "--json", _ISSUE_FIELDS]
+    if q := _search_arg(search):
+        args += ["--search", q]
+    rc, out, serr = await run_gh(args)
     if gh_err := check_gh_error(rc, serr, repo=repo):
         return {"error": gh_err}
     items, perr = parse_json(out or "[]", list)  # a non-list body is an error, never a crash
     return {"error": perr} if perr else {"items": items}
 
 
-async def fetch_prs(repo: str, state: str = "open", limit: int = 30) -> dict:
+async def fetch_prs(
+    repo: str, state: str = "open", limit: int = 30, with_checks: bool = False, search: str = ""
+) -> dict:
     """List pull requests for ``repo`` as ``{"items": [...]}`` (or ``{"error": "..."}``).
 
     Each item is the raw `gh pr list --json` row (adds isDraft/headRefName/baseRefName/
     reviewDecision/mergeStateStatus). Shared by the board's /prs route and the
     `github_list_prs` tool, so the two can never disagree about a PR's state.
+
+    ``search`` (optional) is passed to `gh pr list --search <q>` as a single argv element.
+    ``with_checks`` (opt-in) adds ``statusCheckRollup`` to the ``--json`` fields and replaces
+    each row's raw rollup with a compact ``checks`` summary (see ``_compact_checks``); the
+    board's /prs route turns it on for the CI chip, while `github_list_prs` leaves it off so
+    its argv and output are byte-for-byte unchanged.
     """
     if err := bad_repo(repo):
         return {"error": err}
@@ -81,13 +124,23 @@ async def fetch_prs(repo: str, state: str = "open", limit: int = 30) -> dict:
     if norm is None:
         return {"error": f"Error: state must be open|closed|merged|all (got {state!r})."}
     capped = max(1, min(int(limit), 100))
-    rc, out, serr = await run_gh(
-        ["pr", "list", "--repo", repo, "--state", norm, "--limit", str(capped), "--json", _PR_FIELDS]
-    )
+    fields = _PR_FIELDS + (",statusCheckRollup" if with_checks else "")
+    args = ["pr", "list", "--repo", repo, "--state", norm, "--limit", str(capped), "--json", fields]
+    if q := _search_arg(search):
+        args += ["--search", q]
+    rc, out, serr = await run_gh(args)
     if gh_err := check_gh_error(rc, serr, repo=repo):
         return {"error": gh_err}
     items, perr = parse_json(out or "[]", list)  # a non-list body is an error, never a crash
-    return {"error": perr} if perr else {"items": items}
+    if perr:
+        return {"error": perr}
+    if with_checks:
+        # Replace the raw rollup with the compact summary, in place — the board row reads
+        # `it.checks`, the tool never asks for the field at all.
+        for it in items:
+            if isinstance(it, dict):
+                it["checks"] = _compact_checks(it.pop("statusCheckRollup", None))
+    return {"items": items}
 
 
 def _repos(cfg: dict) -> list[str]:
@@ -192,12 +245,13 @@ def build_data_router(cfg, registry=None):
         return st
 
     @router.get("/issues")
-    async def _issues(repo: str, state: str = "open") -> dict:
-        return await fetch_issues(repo, state)
+    async def _issues(repo: str, state: str = "open", limit: int = 30, search: str = "") -> dict:
+        return await fetch_issues(repo, state, limit, search=search)
 
     @router.get("/prs")
-    async def _prs(repo: str, state: str = "open") -> dict:
-        return await fetch_prs(repo, state)
+    async def _prs(repo: str, state: str = "open", limit: int = 30, search: str = "") -> dict:
+        # with_checks=True adds the CI rollup the board renders as a per-row chip.
+        return await fetch_prs(repo, state, limit, with_checks=True, search=search)
 
     @router.get("/detail/pr")
     async def _detail_pr(repo: str, number: int, fresh: int = 0) -> dict:
