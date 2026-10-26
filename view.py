@@ -140,7 +140,20 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   #drawer-meta{padding:0 12px 12px;display:flex;gap:12px;align-items:center}
   #drawer-tabs{padding:0 12px;border-bottom:1px solid var(--pl-color-border)}
   #drawer-body{padding:12px;overflow:auto;min-height:0;overflow-wrap:anywhere}
-  .pr-body{white-space:pre-wrap;margin-top:16px}
+  .pr-body{margin-top:16px;overflow-wrap:anywhere;min-width:0}
+  .md:not(.md-on){white-space:pre-wrap}
+  .md h1{font-size:18px}.md h2{font-size:16px}.md h3{font-size:14px}
+  .md h4,.md h5,.md h6{font-size:13px}
+  .md h1,.md h2,.md h3,.md h4,.md h5,.md h6{margin:12px 0 6px}
+  .md p{margin:6px 0}.md ul,.md ol{padding-left:24px;margin:6px 0}
+  .md blockquote{margin:8px 0;padding-left:10px;border-left:3px solid var(--pl-color-border);
+    color:var(--pl-color-fg-muted)}
+  .md code,.md pre{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);
+    font-size:12px;background:var(--pl-color-bg-raised);border-radius:var(--pl-radius,8px)}
+  .md code{padding:1px 4px}.md pre{padding:8px;white-space:pre;overflow-x:auto}
+  .md pre code{padding:0;overflow-wrap:normal}
+  .md .md-table{overflow-x:auto;margin:8px 0}
+  .md table{border-collapse:collapse}.md th,.md td{border:1px solid var(--pl-color-border);padding:4px 8px}
   .conversation-item{padding:10px 0;border-bottom:1px solid var(--pl-color-border)}
   .thread-hunk{font-family:var(--pl-font-mono,monospace);font-size:11px;white-space:pre-wrap}
   .pr-facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
@@ -219,6 +232,75 @@ __SETUP_CSS__
   const $ = (id) => document.getElementById(id);
   let tab = "issues";
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+  // Copied/adapted from projectBoard-plugin view/board.js (bd-p87t).
+  const MARKED_CDN = "https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js";
+  const MARKED_SRI = "sha512-xeUh+KxNyTufZOje++oQHstlMQ8/rpyzPuM+gjMFYK3z5ILJGE7l2NvYL+XfliKURMpBIKKp1XoPN/qswlSMFA==";
+  let MARKED = null, MARKED_LOAD = null;
+  function loadMarked(){
+    if(MARKED_LOAD) return MARKED_LOAD;
+    MARKED_LOAD = new Promise((resolve) => {
+      if(window.marked) return resolve(window.marked);
+      const s = document.createElement("script");
+      s.src = MARKED_CDN;
+      s.integrity = MARKED_SRI;
+      s.crossOrigin = "anonymous";
+      s.async = true;
+      s.onload = () => resolve(window.marked || null);
+      s.onerror = () => resolve(null);
+      (document.head || document.documentElement).appendChild(s);
+    }).then((m) => (MARKED = m || null));
+    return MARKED_LOAD;
+  }
+  function renderMarkdown(marked, src){
+    const safe = String(src).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const parse = (marked && marked.parse) ? marked.parse : marked;
+    return parse(safe, {breaks: true, gfm: true});
+  }
+  function sanitizeMarkdown(el){
+    el.querySelectorAll("a[href],img[src]").forEach((n) => {
+      const attr = n.tagName === "A" ? "href" : "src";
+      // Browsers ignore ASCII tabs/newlines within schemes as well as leading whitespace.
+      const url = (n.getAttribute(attr) || "").replace(/[\u0000-\u0020\u007f]/g, "");
+      if(/^(?:javascript|data|vbscript):/i.test(url)) n.removeAttribute(attr);
+    });
+    el.querySelectorAll("img").forEach((n) => {
+      const link = document.createElement("a"), src = n.getAttribute("src");
+      if(src) link.setAttribute("href", src);
+      link.textContent = n.getAttribute("alt") || "image";
+      n.replaceWith(link);
+    });
+    el.querySelectorAll("a").forEach((n) => {
+      n.setAttribute("target", "_blank");
+      n.setAttribute("rel", "noopener noreferrer nofollow");
+    });
+    el.querySelectorAll('input[type="checkbox"]').forEach((n) => { n.disabled = true; });
+    el.querySelectorAll("table").forEach((n) => {
+      const wrap = document.createElement("div");
+      wrap.className = "md-table";
+      n.replaceWith(wrap); wrap.appendChild(n);
+    });
+  }
+  function enhanceMarkdown(root){
+    const nodes = root.querySelectorAll(".md");
+    if(!nodes.length) return;
+    const apply = (marked) => {
+      if(!marked) return;
+      nodes.forEach((el) => {
+        if(el.dataset.mdOn || !el.isConnected) return;
+        try {
+          // Template contents are inert: even images cannot fetch before sanitization.
+          const template = document.createElement("template");
+          template.innerHTML = renderMarkdown(marked, el.getAttribute("data-md") || "");
+          sanitizeMarkdown(template.content);
+          el.replaceChildren(template.content);
+          el.classList.add("md-on");
+          el.dataset.mdOn = "1";
+        } catch(e){ /* Keep the escaped fallback if parsing fails. */ }
+      });
+    };
+    if(MARKED) apply(MARKED);
+    else loadMarked().then(apply);
+  }
   const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}); } catch(e){ return ""; } };
   const fmtDur = (a,b) => { if(!a||!b) return ""; const ms = new Date(b)-new Date(a); if(!(ms>=0)) return ""; const s = Math.round(ms/1000); return s<60 ? s+"s" : Math.floor(s/60)+"m "+(s%60)+"s"; };
   // Mirror read_tools.classify_check for the CheckRun shape (the server already folds a
@@ -307,7 +389,7 @@ __SETUP_CSS__
       + '<dt>Created</dt><dd>'+esc(fmtDate(it.createdAt))+'</dd>'
       + '<dt>Updated</dt><dd>'+esc(fmtDate(it.updatedAt))+'</dd></dl>'
       + '<p class="reviewers">'+reviewerSummary(it)+'</p>'
-      + '<div class="pr-body">'+esc(it.body||"")+'</div>'
+      + '<div class="pr-body md" data-md="'+esc(it.body||"")+'">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '');
   }
   // --- issue mode (bd-nm78.7) -------------------------------------------------
@@ -333,7 +415,7 @@ __SETUP_CSS__
             + esc(p.number)+(p.title ? ' '+esc(p.title) : '')+'</button>').join("")+'</div>'
       : '';
     return facts + linked
-      + '<div class="pr-body">'+esc(it.body||"")+'</div>'
+      + '<div class="pr-body md" data-md="'+esc(it.body||"")+'">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — see GitHub.</p>' : '');
   }
   function issueComments(data){
@@ -377,7 +459,7 @@ __SETUP_CSS__
     return '<article class="conversation-item"><div class="meta">'+esc(author)+' · '+esc(relativeTime(c.submittedAt||c.createdAt))
       + (review ? ' <span class="pill">'+esc(reviewState(c.state))+'</span>' : '')
       + ' <a class="lnk" href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">↗</a></div>'
-      + '<div class="pr-body">'+esc(c.body||"")+'</div>'
+      + '<div class="pr-body md" data-md="'+esc(c.body||"")+'">'+esc(c.body||"")+'</div>'
       + (c.truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '')+'</article>';
   }
   function prConversation(data){
@@ -562,6 +644,7 @@ __SETUP_CSS__
     if(data === undefined){ body.innerHTML = '<div class="hint">Loading…</div>'; return; }
     if(data.error){ body.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
     body.innerHTML = spec.render(data);
+    enhanceMarkdown(body);
     body.scrollTop = top;
   }
   async function loadCheckLog(runId){

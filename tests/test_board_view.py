@@ -584,7 +584,7 @@ def test_workspace_serves_same_page_and_is_public():
     }
 
 
-def test_drawer_shell_and_plain_text_security_contract():
+def test_drawer_shell_and_markdown_security_contract():
     from ghplugin.view import PAGE
 
     assert 'id="scrim"' in PAGE
@@ -593,12 +593,12 @@ def test_drawer_shell_and_plain_text_security_contract():
     assert 'id="drawer-body" role="tabpanel"' in PAGE
     assert "width:min(460px,92vw)" in PAGE
     assert "@media(min-width:1000px){#drawer.wide{width:min(780px,96vw)}}" in PAGE
-    assert ".pr-body{white-space:pre-wrap" in PAGE
+    assert ".md:not(.md-on){white-space:pre-wrap" in PAGE
     for field in ("headRefName", "baseRefName", "body"):
         assert f"esc(it.{field}" in PAGE
     assert "esc(data.title)" in PAGE
     assert "esc(data.error)" in PAGE
-    for forbidden in ("marked", "markdown-it", "renderMarkdown", "innerHTML = data.body", "innerHTML = it.body"):
+    for forbidden in ("markdown-it", "innerHTML = data.body", "innerHTML = it.body"):
         assert forbidden not in PAGE
 
 
@@ -617,7 +617,7 @@ function element(id){
     set innerHTML(v){this.html=v; this.writes++;}, get innerHTML(){return this.html||'';},
     setAttribute(k,v){this.attrs[k]=v;}, getAttribute(k){return this.attrs[k];},
     addEventListener(k,v){this.handlers[k]=v;}, focus(){document.activeElement=this;},
-    querySelectorAll(){return Object.keys((drawer && drawer.tabs) ? drawer.tabs : DRAWER_TABS).map(t => {
+    querySelectorAll(selector){if(selector === ".md") return []; return Object.keys((drawer && drawer.tabs) ? drawer.tabs : DRAWER_TABS).map(t => {
       const el=element('dtab-'+t); el.attrs['data-drawer-tab']=t; return el;
     });}
   });
@@ -895,17 +895,15 @@ def test_drawer_escapes_checks_and_files_strings_and_tints_diffs():
     assert "setInterval(pollDrawer, (spec && spec.poll) || 15000)" in PAGE
 
 
-def test_conversation_plain_text_and_read_only_contract():
+def test_conversation_markdown_and_read_only_contract():
     from ghplugin.view import PAGE
 
     assert 'conversation: {label: "Conversation", path: DET+"/conversation"' in PAGE
     for escaped in ('esc(c.body||"")', "esc(author)", "esc(t.path)", "esc(comments[0].diffHunk)"):
         assert escaped in PAGE
-    assert ".pr-body{white-space:pre-wrap" in PAGE
+    assert ".md:not(.md-on){white-space:pre-wrap" in PAGE
     for forbidden in (
-        "marked",
         "markdown-it",
-        "renderMarkdown",
         "innerHTML = c.body",
         "POST",
         "/reply",
@@ -1029,8 +1027,8 @@ def test_issue_drawer_escapes_sources_and_renders_linked_pr_chips():
     assert 'data-linked-pr="' in PAGE  # the linked-PR chip
     assert 'class="d-count"' in PAGE  # the Comments count badge
     assert "Open on GitHub ↗" in PAGE
-    assert ".pr-body{white-space:pre-wrap" in PAGE  # body is plain pre-wrap, never markdown
-    for forbidden in ("marked", "markdown-it", "renderMarkdown", "innerHTML = it.body"):
+    assert ".md:not(.md-on){white-space:pre-wrap" in PAGE  # escaped fallback preserves whitespace
+    for forbidden in ("markdown-it", "innerHTML = it.body"):
         assert forbidden not in PAGE
 
 
@@ -1296,6 +1294,160 @@ def test_search_box_debounces_runs_on_enter_and_clears_on_esc():
   const quiet = requests.length;
   element('search').handlers.keydown({key:'Escape',preventDefault(){}});
   assert.equal(requests.length, quiet);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+# Minimal inert DOM for the markdown seam: attributes are entity-decoded as in a browser.
+# The parser is deliberately a stub; tests assert exactly what source/options marked receives.
+_MARKDOWN_DOM = r"""
+const window = {}, scripts = [];
+const decode = s => s.replace(/&(?:amp|lt|gt|quot|#x[\da-f]+|#\d+);/gi, x => {
+  const named = {'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"'};
+  return named[x] || String.fromCodePoint(x[2].toLowerCase()==='x' ? parseInt(x.slice(3),16) : +x.slice(2,-1));
+});
+function domNode(tag, attrs={}){
+  return {tagName:tag.toUpperCase(), attrs, dataset:{}, isConnected:true, children:[], classes:[],
+    classList:{add(c){this.owner.classes.push(c);}},
+    getAttribute(k){return this.attrs[k] ?? null;}, setAttribute(k,v){this.attrs[k]=v;},
+    removeAttribute(k){delete this.attrs[k];},
+    appendChild(n){this.children.push(n);},
+    replaceWith(n){const i=this.owner.nodes.indexOf(this); this.owner.nodes[i]=n; n.owner=this.owner;},
+    replaceChildren(fragment){this.content=fragment; this.writes=(this.writes||0)+1;}
+  };
+}
+function fragment(html){
+  const f={html, nodes:[], querySelectorAll(sel){
+    return this.nodes.filter(n => sel==='a[href],img[src]' ?
+      (n.tagName==='A' && n.getAttribute('href')!==null || n.tagName==='IMG' && n.getAttribute('src')!==null) :
+      sel==='input[type="checkbox"]' ? n.tagName==='INPUT' && n.attrs.type==='checkbox' : n.tagName===sel.toUpperCase());
+  }};
+  for(const m of html.matchAll(/<([a-z][\w-]*)\b([^>]*)>/gi)){
+    const attrs={};
+    for(const a of m[2].matchAll(/([\w-]+)="([^"]*)"/g)) attrs[a[1]]=decode(a[2]);
+    const n=domNode(m[1],attrs); n.owner=f; f.nodes.push(n);
+  }
+  return f;
+}
+document.createElement = tag => {
+  if(tag==='template') return {set innerHTML(html){this.content=fragment(html);}};
+  return domNode(tag);
+};
+document.head={appendChild(s){scripts.push(s);}};
+function prose(src){
+  const n=domNode('div',{'data-md':src}); n.classList.owner=n; n.fallback=esc(src); return n;
+}
+const rootFor = nodes => ({querySelectorAll(sel){assert.equal(sel,'.md');return nodes;}});
+"""
+
+
+def test_markdown_source_escape_and_sanitization():
+    _run_drawer_js(
+        _MARKDOWN_DOM
+        + r"""
+const hostile='<img src=x onerror=alert(1)><script>alert(1)</script>';
+const literal=renderMarkdown({parse(src,opts){
+  assert.equal(src,esc(hostile)); assert.deepEqual(opts,{gfm:true,breaks:true}); return '<p>'+src+'</p>';
+}},hostile);
+assert.deepEqual(fragment(literal).nodes.map(n=>n.tagName),['P']);
+assert.equal(decode(literal.slice(3,-4)),hostile);
+const f=fragment('<a href="javascript:alert(1)">x</a><a href=" DATA:text/html,x">x</a>'
+  +'<a href="VbScript:x">x</a><a href="java&#x09;script:x">x</a>'
+  +'<a href="https://example.com">safe</a><a href="mailto:a@example.com">mail</a>'
+  +'<img src="https://example.com/pixel" alt="&lt;b&gt;alt&lt;/b&gt;">'
+  +'<img src="data:image/png,x"><img alt="missing"><input type="checkbox"><table></table>');
+sanitizeMarkdown(f);
+assert.equal(f.querySelectorAll('img').length,0);
+const links=f.querySelectorAll('a');
+for(const n of links.slice(0,4)) assert.equal(n.getAttribute('href'),null);
+assert.equal(links[4].getAttribute('href'),'https://example.com');
+assert.equal(links[5].getAttribute('href'),'mailto:a@example.com');
+assert.equal(links[6].getAttribute('href'),'https://example.com/pixel');
+assert.equal(links[6].textContent,'<b>alt</b>');
+for(const n of links.slice(7)) assert.equal(n.getAttribute('href'),null);
+assert.equal(links[7].textContent,'image'); assert.equal(links[8].textContent,'missing');
+for(const n of links){assert.equal(n.attrs.target,'_blank');assert.equal(n.attrs.rel,'noopener noreferrer nofollow');}
+assert.equal(f.querySelectorAll('input[type="checkbox"]')[0].disabled,true);
+const wrap=f.querySelectorAll('div')[0];
+assert.equal(wrap.className,'md-table'); assert.equal(wrap.children[0].tagName,'TABLE');
+"""
+    )
+
+
+def test_markdown_lazy_loader_failure_and_success():
+    for outcome in ("error", "load"):
+        _run_drawer_js(
+            _MARKDOWN_DOM
+            + f"const outcome={outcome!r};\n"
+            + r"""
+(async()=>{
+  assert.equal(scripts.length,0);
+  enhanceMarkdown(rootFor([])); assert.equal(scripts.length,0);
+  const src='# Heading\n**bold** `inline`\n| a |\n| - |\n| b |\n```js\nx\n```\n- item';
+  const n=prose(src), root=rootFor([n]);
+  enhanceMarkdown(root); enhanceMarkdown(root);
+  const promise=loadMarked(); assert.equal(promise,loadMarked()); assert.equal(scripts.length,1);
+  const s=scripts[0];
+  assert.equal(s.src,'https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js');
+  assert.equal(s.integrity,'sha512-xeUh+KxNyTufZOje++oQHstlMQ8/rpyzPuM+gjMFYK3z5ILJGE7l2NvYL+XfliKURMpBIKKp1XoPN/qswlSMFA==');
+  assert.equal(s.crossOrigin,'anonymous'); assert.equal(s.async,true);
+  let parses=0;
+  window.marked={parse(text,opts){
+    parses++; assert.equal(text,src); assert.deepEqual(opts,{gfm:true,breaks:true});
+    return '<h1>Heading</h1><p><strong>bold</strong> <code>inline</code></p>'
+      +'<table><tr><td>b</td></tr></table><pre><code>x</code></pre><ul><li>item</li></ul>';
+  }};
+  s['on'+outcome](); await promise; await flush();
+  if(outcome==='error'){
+    assert.equal(n.content,undefined); assert.equal(n.fallback,esc(src)); assert.equal(n.dataset.mdOn,undefined);
+    enhanceMarkdown(root); await flush(); assert.equal(scripts.length,1); assert.equal(parses,0);
+  } else {
+    assert.equal(n.writes,1); assert.equal(n.dataset.mdOn,'1'); assert.ok(n.classes.includes('md-on'));
+    for(const tag of ['h1','strong','code','pre','ul','li']) assert.ok(n.content.querySelectorAll(tag).length);
+    assert.ok(n.content.querySelectorAll('div').some(n=>n.className==='md-table'));
+    const fresh=prose(src); enhanceMarkdown(rootFor([fresh]));
+    assert.equal(fresh.dataset.mdOn,'1'); assert.equal(parses,2); assert.equal(scripts.length,1);
+    const broken=prose(src); MARKED={parse(){throw Error('bad parse');}};
+    enhanceMarkdown(rootFor([broken])); assert.equal(broken.content,undefined); assert.equal(broken.fallback,esc(src));
+  }
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+        )
+
+
+def test_every_prose_panel_marked_and_poll_reenhances_only_prose():
+    _run_drawer_js(
+        _MARKDOWN_DOM
+        + r"""
+(async()=>{
+  const src='**body** <img src=x> " &';
+  openDrawer('o/n',7);
+  const mdSources=html=>[...html.matchAll(/class="pr-body md" data-md="([^"]*)"/g)].map(m=>decode(m[1]));
+  assert.deepEqual(mdSources(prOverview({body:src,headRefName:src,baseRefName:src})),[src]);
+  assert.deepEqual(mdSources(issueOverview({body:src,milestone:{title:src}})),[src]);
+  assert.deepEqual(mdSources(issueComments({comments:[{body:src},{body:src}]})),[src,src]);
+  const conversation=prConversation({comments:[{body:src}],reviews:[{body:src}],threads:[
+    {id:'t',path:src,comments:[{body:src,diffHunk:src},{body:src}]}]});
+  assert.deepEqual(mdSources(conversation),[src,src,src,src]);
+  assert.ok(conversation.includes('<pre class="thread-hunk">'+esc(src)+'</pre>'));
+  const files=prFiles({files:[{path:src,patch:src}]});
+  assert.deepEqual(mdSources(files),[]); assert.ok(files.includes('>'+esc(src)+'</div>'));
+  drawer.checkLogs[1]={open:true,log:src};
+  const checks=prChecks({checks:[{name:src,status:'COMPLETED',conclusion:'FAILURE',run_id:1}]});
+  assert.deepEqual(mdSources(checks),[]); assert.ok(checks.includes('<pre class="log">'+esc(src)+'</pre>'));
+  // Exercise the real poll/render path; model the DOM's fresh nodes on each innerHTML write.
+  let nodes=[];
+  const body=element('drawer-body');
+  Object.defineProperty(body,'innerHTML',{get(){return this.html;},set(html){
+    nodes.forEach(n=>n.isConnected=false); this.html=html; nodes=mdSources(html).map(prose);
+  }});
+  body.querySelectorAll=sel=>{assert.equal(sel,'.md');return nodes;};
+  MARKED={parse(s){return '<p><strong>'+s+'</strong></p>';}};
+  await reply(latest(),{number:7,body:'one'});
+  assert.equal(nodes[0].dataset.mdOn,'1'); assert.ok(nodes[0].content.html.includes('one'));
+  pollDrawer(); await reply(latest(),{number:7,body:'two'});
+  assert.equal(nodes[0].dataset.mdOn,'1'); assert.ok(nodes[0].content.html.includes('two'));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     )
