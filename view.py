@@ -1,10 +1,10 @@
 """The GitHub console pages — served at ``/plugins/github/*`` (by api.py) and iframed
-by the console. Two pages, two surfaces:
+by the console. Two pages, shared across console surfaces:
 
-- ``PAGE`` (``/view``) — the **read-only board**: a quick look at a project's board,
+- ``PAGE`` (``/view`` and ``/workspace``) — the **read-only board**: a quick look at a project's board,
   two tabs (Issues / Pull Requests) over a repo picker (the configured ``github.repos``)
   + an open/closed/all filter. No writes — it's a viewer. Declared in the manifest as a
-  right-dock view AND a ⌘K palette morph (``palette: inline``).
+  right-dock view AND a ⌘K palette morph (``palette: inline``), plus a full-width rail view.
 - ``NEW_ISSUE_PAGE`` (``/new-issue``) — the compact **file-an-issue** form (title / kind /
   repo / body → the gate-checked ``POST /issue``). Declared as a util-bar widget
   (``utility``) AND a distinct ⌘K palette page (``palette: { path }``) — so filing lives
@@ -121,6 +121,22 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .cmt{display:inline-flex;align-items:center;gap:3px}
   .pill{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--pl-color-border)}
   .empty,.hint{padding:24px 14px;text-align:center;color:var(--pl-color-fg-muted)}
+  #scrim{display:none;position:fixed;inset:0;background:#0006;z-index:10}
+  #scrim.open{display:block}
+  #drawer{position:fixed;inset:0 0 0 auto;width:min(460px,92vw);z-index:11;
+    background:var(--pl-color-bg-raised);border-left:1px solid var(--pl-color-border);
+    display:none;flex-direction:column;box-shadow:-8px 0 30px #0003}
+  #drawer.open{display:flex}
+  @media(min-width:1000px){#drawer.wide{width:min(780px,96vw)}}
+  .dh{padding:12px;display:flex;align-items:flex-start;gap:8px}
+  .dh h2{font-size:16px;margin:0;overflow-wrap:anywhere;flex:1}
+  .dx{background:transparent;border:0;color:inherit;cursor:pointer;font-size:18px}
+  #drawer-meta{padding:0 12px 12px;display:flex;gap:12px;align-items:center}
+  #drawer-tabs{padding:0 12px;border-bottom:1px solid var(--pl-color-border)}
+  #drawer-body{padding:12px;overflow:auto;min-height:0;overflow-wrap:anywhere}
+  .pr-body{white-space:pre-wrap;margin-top:16px}
+  .pr-facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
+  .pr-facts dd{margin:0}
 __SETUP_CSS__
 </style></head><body>
 <div id="wrap">
@@ -136,6 +152,15 @@ __SETUP_CSS__
   </div>
   <div id="setup" role="status"></div>
   <div id="list"><div class="hint">Loading…</div></div>
+</div>
+<!-- Drawer shell copied from projectBoard-plugin view/board.html. -->
+<div id="scrim"></div>
+<div id="drawer" class="wide" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+  <div class="dh"><h2 id="drawer-title">Pull request</h2>
+    <button class="dx" id="drawer-close" type="button" aria-label="Close">✕</button></div>
+  <div id="drawer-meta"></div>
+  <div id="drawer-tabs" role="tablist" aria-label="Pull request views"></div>
+  <div id="drawer-body" role="tabpanel" tabindex="0"></div>
 </div>
 <script type="module">
   "use strict";
@@ -165,20 +190,141 @@ __SETUP_CSS__
     return '<a class="row" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
       + '<div class="top"><span class="dot '+(st==="closed"?"closed":"open")+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
-      + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+fmtDate(it.createdAt)+'</span>'
+      + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
       + (cc?('<span class="cmt" title="'+esc(cc)+' comment'+(cc===1?'':'s')+'">'+ICON.comment+esc(cc)+'</span>'):'')+' '+labelPills(it.labels)+'</div></a>';
   }
-  function prRow(it){
+  function prRow(it, repo){
     const merged = (it.state||"").toLowerCase()==="merged", draft = !!it.isDraft;
     const review = it.reviewDecision ? String(it.reviewDecision).toLowerCase().replace(/_/g," ") : "";
-    return '<a class="row" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
+    return '<a class="row" data-pr="'+esc(it.number)+'" data-repo="'+esc(repo)+'" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
       + '<div class="top"><span class="dot '+(merged?"merged":(draft?"draft":"open"))+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
-      + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+fmtDate(it.createdAt)+'</span>'
+      + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
       + (it.headRefName?('<span class="pill">'+esc(it.headRefName)+'</span>'):'')
       + (draft?'<span class="pill">draft</span>':'')+(review?('<span class="pill">'+esc(review)+'</span>'):'')
       + ' '+labelPills(it.labels)+'</div></a>';
   }
+
+  // Adapted from projectBoard-plugin view/board.js: shared shell, automatic tab
+  // activation, identity + sequence fences, and unchanged snapshot suppression.
+  const DRAWER_TABS = {overview: {label: "Overview", path: "/api/plugins/github/detail/pr", render: prOverview}};
+  let drawerId = 0, drawerSeq = 0, drawer = null, drawerTimer = null, drawerLast = "";
+  let drawerOpener = null;
+  function prOverview(it){
+    return '<dl class="pr-facts"><dt>Author</dt><dd>'+esc((it.author&&it.author.login)||"?")+'</dd>'
+      + '<dt>Branches</dt><dd>'+esc(it.headRefName)+' → '+esc(it.baseRefName)+'</dd>'
+      + '<dt>Created</dt><dd>'+esc(fmtDate(it.createdAt))+'</dd>'
+      + '<dt>Updated</dt><dd>'+esc(fmtDate(it.updatedAt))+'</dd></dl>'
+      + '<div class="pr-body">'+esc(it.body||"")+'</div>'
+      + (it.body_truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '');
+  }
+  function renderDrawerTabs(){
+    $("drawer-tabs").innerHTML = Object.entries(DRAWER_TABS).map(([t, spec]) =>
+      '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="tab"'
+      + ' aria-selected="'+(t===drawer.tab)+'" aria-controls="drawer-body" tabindex="'+(t===drawer.tab?0:-1)+'"'
+      + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+'</button>').join("");
+    $("drawer-body").setAttribute("aria-labelledby", "dtab-"+drawer.tab);
+  }
+  function selectDrawerTab(t, focus){
+    if(!drawer || !Object.hasOwn(DRAWER_TABS, t)) return;
+    if(t !== drawer.tab){
+      drawer.tab = t; ++drawerSeq; drawerLast = "";
+      renderDrawerTabs();
+      $("drawer-body").innerHTML = '<div class="hint">Loading…</div>';
+      pollDrawer();
+    }
+    if(focus) $("dtab-"+t).focus();
+  }
+  async function pollDrawer(){
+    if(!drawer || document.hidden) return;
+    const id = drawer.id, seq = ++drawerSeq, active = drawer.tab;
+    const spec = DRAWER_TABS[active];
+    let data;
+    try {
+      const response = await kit.apiFetch(spec.path+"?repo="+encodeURIComponent(drawer.repo)+"&number="+encodeURIComponent(drawer.number));
+      data = response.ok ? await response.json() : {error: "Could not load pull request."};
+    } catch(e){ data = {error: "Failed to load — is the agent reachable?"}; }
+    if(!drawer || drawer.id !== id || seq !== drawerSeq || document.hidden) return;
+    const sig = JSON.stringify(data);
+    if(sig === drawerLast) return;
+    drawerLast = sig;
+    if(data.error){ $("drawer-body").innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
+    const state = String(data.state||"").toLowerCase();
+    const pill = state==="merged" ? "merged" : state==="closed" ? "closed" : data.isDraft ? "draft" : "open";
+    $("drawer-title").innerHTML = '#'+esc(data.number)+' '+esc(data.title);
+    // Construct the link from the requested identity; never trust an API URL scheme.
+    const href = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/pull/"+encodeURIComponent(drawer.number);
+    $("drawer-meta").innerHTML = '<span class="pill">'+esc(pill)+'</span> <a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
+    const body = $("drawer-body"), top = body.scrollTop;
+    body.innerHTML = spec.render(data);
+    body.scrollTop = top;
+  }
+  function stopDrawerPolling(){
+    if(drawerTimer !== null){ clearInterval(drawerTimer); drawerTimer = null; }
+  }
+  function startDrawerPolling(){
+    stopDrawerPolling();
+    if(!drawer || document.hidden) return;
+    pollDrawer();
+    drawerTimer = setInterval(pollDrawer, 15000);
+  }
+  function openDrawer(repo, number, opener){
+    drawer = {id: ++drawerId, repo, number, tab: "overview"};
+    drawerLast = ""; drawerOpener = opener;
+    $("drawer-title").innerHTML = '#'+esc(number)+' Pull request';
+    $("drawer-meta").innerHTML = "";
+    $("drawer-body").innerHTML = '<div class="hint">Loading…</div>';
+    $("drawer-body").scrollTop = 0;
+    renderDrawerTabs();
+    $("drawer").hidden = false;
+    $("drawer").classList.add("open"); $("scrim").classList.add("open");
+    $("wrap").inert = true;
+    $("drawer-close").focus();
+    startDrawerPolling();
+  }
+  function closeDrawer(){
+    if(!drawer) return;
+    drawer = null; ++drawerSeq; drawerLast = "";
+    stopDrawerPolling();
+    $("drawer").classList.remove("open"); $("scrim").classList.remove("open");
+    $("drawer").hidden = true; $("wrap").inert = false;
+    if(drawerOpener && drawerOpener.isConnected) drawerOpener.focus();
+    drawerOpener = null;
+  }
+  $("list").addEventListener("click", (e) => {
+    if(e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const row = e.target.closest("[data-pr]");
+    if(!row) return;
+    e.preventDefault();
+    openDrawer(row.dataset.repo, row.dataset.pr, row);
+  });
+  $("drawer-close").onclick = closeDrawer;
+  $("scrim").onclick = closeDrawer;
+  document.addEventListener("keydown", (e) => {
+    if(!drawer) return;
+    if(e.key === "Escape"){ e.preventDefault(); closeDrawer(); }
+    if(e.key === "Tab"){
+      const nodes = [...$("drawer").querySelectorAll('button:not([tabindex="-1"]), a[href], [tabindex="0"]')];
+      const first = nodes[0], last = nodes[nodes.length-1];
+      if(e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+      else if(!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+    }
+  });
+  $("drawer-tabs").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-drawer-tab]");
+    if(t) selectDrawerTab(t.getAttribute("data-drawer-tab"), false);
+  });
+  $("drawer-tabs").addEventListener("keydown", (e) => {
+    const tabs = [...$("drawer-tabs").querySelectorAll("[data-drawer-tab]")].map(b => b.getAttribute("data-drawer-tab"));
+    const i = tabs.indexOf(drawer ? drawer.tab : "");
+    const next = {ArrowRight: i+1, ArrowLeft: i-1, Home: 0, End: tabs.length-1}[e.key];
+    if(next === undefined || !tabs.length) return;
+    e.preventDefault(); selectDrawerTab(tabs[(next+tabs.length)%tabs.length], true);
+  });
+  document.addEventListener("visibilitychange", () => {
+    ++drawerSeq; // a response started before hiding cannot paint after resuming
+    startDrawerPolling();
+  });
 
   // A monotonic token so an in-flight load() whose fetch resolves AFTER a newer load()
   // started (rapid tab/filter clicks, or any double-trigger) drops its stale result instead
@@ -197,7 +343,7 @@ __SETUP_CSS__
       if(data.error){ list.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
       const items = data.items||[];
       if(!items.length){ list.innerHTML = '<div class="empty">No '+tab+' for this filter.</div>'; return; }
-      list.innerHTML = items.map(tab==="issues"?issueRow:prRow).join("");
+      list.innerHTML = items.map(it => tab==="issues" ? issueRow(it) : prRow(it, repo)).join("");
     } catch(e){ if(my===loadSeq) list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
   }
 

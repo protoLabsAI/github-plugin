@@ -66,10 +66,12 @@ settings:
 #  - the READ-ONLY board (Issues/PRs tabs over the repo picker): right dock + a ⌘K morph
 #    (`palette: inline` opens the board in the palette body). `placement: right` is just a
 #    default — views are drag-sortable in the console.
+#  - the same READ-ONLY board at /workspace: full-width GitHub rail view.
 #  - FILE AN ISSUE (the compact form): a util-bar widget pill (`utility`, opens its dialog)
 #    AND a distinct ⌘K palette page (`palette: { path }`). Filing lives here + the palette,
 #    NOT in the board — the board is a viewer.
 views:
+  - { id: github-workspace, label: GitHub, icon: Github, path: /plugins/github/workspace, placement: rail }
   - { id: github, label: GitHub, icon: Github, path: /plugins/github/view, placement: right, palette: inline }
   - { id: github-new-issue, label: New issue, icon: Bug, path: /plugins/github/new-issue, utility: { info: "File a GitHub issue" }, palette: { path: /plugins/github/new-issue } }
 
@@ -78,6 +80,7 @@ views:
 # plugin public_paths feature; older hosts ignore it (the pages stay open-mode only).
 # The page is chrome; the DATA it fetches stays gated under /api/plugins/github/*.
 public_paths:
+  - /plugins/github/workspace
   - /plugins/github/view
   - /plugins/github/new-issue
 

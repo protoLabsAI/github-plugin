@@ -250,8 +250,7 @@ def test_page_references_gated_endpoints():
 
 
 def test_manifest_declares_board_and_widget_views():
-    """Two views: the read-only board (right dock + ⌘K) and the file-an-issue widget
-    (util-bar pill + ⌘K palette page)."""
+    """The existing dock/palette board and file-an-issue widget stay unchanged."""
     from pathlib import Path
 
     import yaml
@@ -459,3 +458,156 @@ def test_routes_resolve_the_picker_off_the_event_loop():
     # TestClient runs the app loop on its own portal thread; to_thread hands off to a
     # default-executor worker, whose name is the giveaway.
     assert all(t.name.startswith("asyncio_") for t in threads), [t.name for t in threads]
+
+
+def test_workspace_serves_same_page_and_is_public():
+    from pathlib import Path
+
+    import yaml
+    from ghplugin.view import PAGE
+
+    client = TestClient(_app())
+    response = client.get("/plugins/github/workspace")
+    assert response.status_code == 200
+    assert response.text == client.get("/plugins/github/view").text == PAGE
+    manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    assert "/plugins/github/workspace" in manifest["public_paths"]
+    workspace = next(v for v in manifest["views"] if v["id"] == "github-workspace")
+    assert workspace == {
+        "id": "github-workspace",
+        "label": "GitHub",
+        "icon": "Github",
+        "path": "/plugins/github/workspace",
+        "placement": "rail",
+    }
+
+
+def test_drawer_shell_and_plain_text_security_contract():
+    from ghplugin.view import PAGE
+
+    assert 'id="scrim"' in PAGE
+    assert 'role="dialog" aria-modal="true" aria-labelledby="drawer-title"' in PAGE
+    assert 'id="drawer-tabs" role="tablist"' in PAGE
+    assert 'id="drawer-body" role="tabpanel"' in PAGE
+    assert "width:min(460px,92vw)" in PAGE
+    assert "@media(min-width:1000px){#drawer.wide{width:min(780px,96vw)}}" in PAGE
+    assert ".pr-body{white-space:pre-wrap" in PAGE
+    for field in ("headRefName", "baseRefName", "body"):
+        assert f"esc(it.{field}" in PAGE
+    assert "esc(data.title)" in PAGE
+    assert "esc(data.error)" in PAGE
+    for forbidden in ("marked", "markdown-it", "renderMarkdown", "innerHTML = data.body", "innerHTML = it.body"):
+        assert forbidden not in PAGE
+
+
+def test_drawer_interactions_and_async_lifecycle():
+    """Execute the shipped JS with a small DOM/fetch/timer harness, no host or network.
+
+    Node is optional locally; the static contract and route tests always run in the
+    Python-only gate. When available this also checks races and event behavior.
+    """
+    import shutil
+    import subprocess
+
+    import pytest
+    from ghplugin.view import PAGE
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for the JavaScript interaction harness")
+    script = PAGE.split('<script type="module">', 1)[1].split("</script>", 1)[0]
+    script = script[script.index("  const $ =") :].replace("  kit.initPluginView(boot);", "")
+    harness = r"""
+const assert = require('node:assert/strict');
+const elements = new Map(), events = {}, requests = [], timers = new Map();
+let timerId = 0;
+function element(id){
+  if(!elements.has(id)) elements.set(id, {
+    id, dataset: {}, handlers: {}, attrs: {}, writes: 0, scrollTop: 0, isConnected: true,
+    classList: {add(){}, remove(){}},
+    set innerHTML(v){this.html=v; this.writes++;}, get innerHTML(){return this.html||'';},
+    setAttribute(k,v){this.attrs[k]=v;}, getAttribute(k){return this.attrs[k];},
+    addEventListener(k,v){this.handlers[k]=v;}, focus(){document.activeElement=this;},
+    querySelectorAll(){return Object.keys(DRAWER_TABS).map(t => {
+      const el=element('dtab-'+t); el.attrs['data-drawer-tab']=t; return el;
+    });}
+  });
+  return elements.get(id);
+}
+const document = {hidden: false, getElementById: element, addEventListener(k,v){events[k]=v;}};
+const kit = {apiFetch(path){return new Promise((resolve,reject)=>requests.push({path,resolve,reject}));}};
+const setInterval = (fn,ms) => {assert.equal(ms,15000); timers.set(++timerId,fn); return timerId;};
+const clearInterval = id => timers.delete(id);
+const flush = async()=>{await Promise.resolve(); await Promise.resolve(); await Promise.resolve();};
+const reply = async(index,data,ok=true)=>{requests[index].resolve({ok,json:async()=>data}); await flush();};
+"""
+    checks = r"""
+(async()=>{
+  const hostile = '<img src=x onerror="steal()">&';
+  const data = {number:7,title:hostile,state:'OPEN',author:{login:hostile},
+    headRefName:hostile,baseRefName:hostile,body:hostile,createdAt:'2026-01-01',updatedAt:'2026-01-02'};
+  const row = element('pr-row'); row.dataset={repo:'o/n',pr:'7'};
+  const click = (opts={})=>{
+    let prevented=false;
+    element('list').handlers.click({button:0,target:{closest:()=>row},preventDefault(){prevented=true;},...opts});
+    return prevented;
+  };
+  for(const opts of [{ctrlKey:true},{metaKey:true},{shiftKey:true},{altKey:true},{button:1},{defaultPrevented:true}]){
+    assert.equal(click(opts),false);
+  }
+  assert.equal(requests.length,0);
+  element('list').handlers.click({button:0,target:{closest:()=>null},preventDefault(){assert.fail('issue intercepted');}});
+  assert.equal(click(),true);
+  assert.equal(requests[0].path,'/api/plugins/github/detail/pr?repo=o%2Fn&number=7');
+  assert.equal(timers.size,1);
+  assert.equal(element('drawer').hidden,false);
+  await reply(0,data);
+  assert.ok(element('drawer-title').innerHTML.includes('&lt;img'));
+  assert.ok(element('drawer-body').innerHTML.includes('&lt;img'));
+  assert.ok(!element('drawer-body').innerHTML.includes('<img'));
+  assert.ok(element('drawer-meta').innerHTML.includes('https://github.com/o/n/pull/7'));
+  assert.ok(element('drawer-meta').innerHTML.includes('open'));
+  const writes = element('drawer-body').writes;
+  pollDrawer(); await reply(1,data);
+  assert.equal(element('drawer-body').writes,writes);
+  pollDrawer(); pollDrawer();
+  await reply(3,{...data,title:'New'}); await reply(2,{...data,title:'Old'});
+  assert.equal(element('drawer-title').innerHTML,'#7 New');
+  pollDrawer(); closeDrawer(); openDrawer('o/m','7',row);
+  await reply(4,{...data,title:'Wrong repo'});
+  assert.ok(!element('drawer-title').innerHTML.includes('Wrong repo'));
+  await reply(5,{...data,state:'MERGED',isDraft:true});
+  assert.ok(element('drawer-meta').innerHTML.includes('merged'));
+  pollDrawer(); document.hidden=true; events.visibilitychange();
+  assert.equal(timers.size,0);
+  const count=requests.length; pollDrawer(); assert.equal(requests.length,count);
+  await reply(6,{...data,title:'Hidden'});
+  assert.ok(!element('drawer-title').innerHTML.includes('Hidden'));
+  document.hidden=false; events.visibilitychange(); assert.equal(timers.size,1);
+  await reply(7,{error:hostile}); assert.ok(element('drawer-body').innerHTML.includes('&lt;img'));
+  pollDrawer(); await reply(8,data); assert.ok(element('drawer-body').innerHTML.includes('Author'));
+  // Add a future tab to verify automatic activation beyond today's single Overview.
+  DRAWER_TABS.checks = {label:'Checks',path:'/checks',render:()=>'<p>Checks</p>'};
+  renderDrawerTabs();
+  for(const [key,want] of [['ArrowRight','checks'],['Home','overview'],['End','checks'],['ArrowRight','overview'],['ArrowLeft','checks']]){
+    let prevented=false;
+    element('drawer-tabs').handlers.keydown({key,preventDefault(){prevented=true;}});
+    assert.equal(drawer.tab,want); assert.equal(prevented,true);
+    assert.equal(document.activeElement.id,'dtab-'+want);
+  }
+  const pending=requests.length-1;
+  events.keydown({key:'Escape',preventDefault(){}});
+  assert.equal(drawer,null); assert.equal(timers.size,0); assert.equal(document.activeElement,row);
+  await reply(pending,{title:'Late'});
+  assert.equal(element('drawer').hidden,true);
+  for(const id of ['drawer-close','scrim']){
+    openDrawer('o/n','7',row); element(id).onclick();
+    assert.equal(drawer,null); assert.equal(timers.size,0);
+  }
+  assert.ok(prRow({...data,url:'https://github.com/o/n/pull/7'},'o/n').includes('data-repo="o/n"'));
+  assert.ok(prRow({...data,url:'https://github.com/o/n/pull/7'},'o/n').includes('target="_blank"'));
+  assert.ok(!issueRow(data).includes('data-pr='));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    result = subprocess.run([node, "-"], input=harness + script + checks, text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
