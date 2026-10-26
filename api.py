@@ -207,6 +207,30 @@ def build_data_router(cfg, registry=None):
 
         return await fetch_pr_detail(repo, number, fresh=bool(fresh))
 
+    def _detail_number(value: str):
+        # Keep malformed query values in the detail API's {error} contract.
+        try:
+            return int(value) if value.isascii() and value.isdecimal() else value
+        except ValueError:
+            return value
+
+    @router.get("/detail/pr/checks")
+    async def _detail_checks(repo: str, number: str, fresh: int = 0, run_id: str | None = None) -> dict:
+        from .detail import fetch_pr_checks
+
+        return await fetch_pr_checks(
+            repo,
+            _detail_number(number),
+            fresh=bool(fresh),
+            run_id=_detail_number(run_id) if run_id is not None else None,
+        )
+
+    @router.get("/detail/pr/diff")
+    async def _detail_diff(repo: str, number: str, fresh: int = 0) -> dict:
+        from .detail import fetch_pr_diff
+
+        return await fetch_pr_diff(repo, _detail_number(number), fresh=bool(fresh))
+
     @router.post("/issue")
     async def _create_issue(body: dict = Body(...)) -> dict:
         resolved = await _resolved()
