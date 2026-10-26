@@ -291,6 +291,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
         delete_branch: bool = False,
         subject: str = "",
         body: str = "",
+        sha: str = "",
         dry_run: bool = False,
         confirm: bool = False,
     ) -> str:
@@ -306,6 +307,10 @@ def get_write_tools(default_repo="", emit=None) -> list:
                 not the PR title, unless subject is set — so fixing the PR title alone
                 does not fix the subject that lands on main.
             body: Merge-commit body. Squash/merge only — refused on rebase.
+            sha: The FULL head commit sha you verified (reviews, checks). When set, the merge
+                happens only if the PR's head is still exactly that commit — a push after
+                your check makes GitHub refuse instead of merging unreviewed code. Can't be
+                combined with delete_branch.
             dry_run: If true, report what WOULD be merged without merging.
             confirm: Must be true to actually merge — a guard against accidental or
                 autonomous merges even when the per-agent write gate is on.
@@ -319,6 +324,11 @@ def get_write_tools(default_repo="", emit=None) -> list:
             return f"Error: method must be 'squash', 'merge', or 'rebase' (got {method!r})."
         if method == "rebase" and (subject or body):
             return "Error: subject/body only apply to squash or merge — GitHub ignores them on a rebase merge."
+        sha = (sha or "").strip().lower()
+        if sha and not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return f"Error: sha must be the full 40-character head commit sha (got {sha!r})."
+        if sha and delete_branch:
+            return "Error: sha and delete_branch can't be combined — merge pinned, then delete the branch separately."
         if dry_run:
             extra = " and delete its branch" if delete_branch else ""
             detail = ""
@@ -335,6 +345,30 @@ def get_write_tools(default_repo="", emit=None) -> list:
                 f"Refusing to merge PR #{number} in {repo} without confirm=true — merging is irreversible. "
                 "Re-call with confirm=true, or dry_run=true to preview."
             )
+        if sha:
+            # The REST merge endpoint takes the expected head and refuses (409) when the
+            # branch moved — `gh pr merge` has no equivalent we can trust not to hang.
+            args = ["api", "-X", "PUT", f"repos/{repo}/pulls/{number}/merge", "-f", f"sha={sha}"]
+            args += ["-f", f"merge_method={method}"]
+            if subject:
+                args += ["-f", f"commit_title={subject}"]
+            if body:
+                args += ["-f", f"commit_message={body}"]
+            rc, out, serr = await run_gh(args)
+            if rc and ("409" in (serr or "") or "head branch was modified" in (serr or "").lower()):
+                return (
+                    f"Not merged: PR #{number}'s head is no longer {sha[:12]} — something was pushed after your "
+                    "check. Re-verify the new head (reviews and checks) before merging it."
+                )
+            if gh_err := check_gh_error(rc, serr, repo=repo):
+                return gh_err
+            data, err = parse_json(out)
+            if err:
+                return err
+            if not data.get("merged"):
+                return f"Not merged: {data.get('message') or out[:200]}"
+            _emit("pr.merged", {"repo": repo, "number": str(number), "method": method})
+            return f"Merged PR #{number} in {repo} via {method} at head {sha[:12]} → merge commit {data.get('sha')}."
         args = ["pr", "merge", str(number), "--repo", repo, f"--{method}"]
         if delete_branch:
             args.append("--delete-branch")

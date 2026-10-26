@@ -42,6 +42,7 @@ status.py                # the first-run probe: compute_status / summarize_statu
 projects.py              # repo sources: host projects: registry (ADR 0095) + checkout `origin` remote parsing
 read_tools.py            # 16 read tools (6 ported core + file/contents/pr-file/path-exists/pr-diff + status + list_prs/comments/search + review_threads)
 write_tools.py           # 12 write tools (create/edit issue+pr/merge/close/comment/labels+create-label/assignees + reply/resolve review threads) — gated
+release_tools.py         # 3 release reads (run jobs, release, release asset) + 4 gated release writes (dispatch, tag, edit notes, upload asset)
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
 api.py                   # routers — public PAGES (view/workspace/new-issue) + gated data routes (config/status/issues/prs/issue)
@@ -89,7 +90,7 @@ data routes, the `token` secret — reads through them per call. Never capture a
 value at register time: an `onboard_project` mid-session, or a token pasted in
 Settings, must be seen by the very next call.
 
-## 5. Tools (all implemented — 16 read / 12 write / 3 review = 31)
+## 5. Tools (all implemented — 19 read / 16 write / 3 review = 38)
 
 Each tool mocks `run_gh` in its test and asserts the exact argv + readable errors.
 `tests/test_no_raise_sweep.py` additionally invokes EVERY registered tool against a

@@ -80,8 +80,11 @@ def register(registry) -> None:
     n_read = 0
     try:
         from .read_tools import get_read_tools
+        from .release_tools import get_release_read_tools
 
-        read = get_read_tools(current_default_repo, current_repos, registry=registry)
+        read = get_read_tools(current_default_repo, current_repos, registry=registry) + get_release_read_tools(
+            current_default_repo
+        )
         for t in read:
             registry.register_tool(t)
         n_read = len(read)
@@ -92,14 +95,17 @@ def register(registry) -> None:
     n_write = 0
     if write_enabled:
         try:
+            from .release_tools import get_release_write_tools
             from .review_tools import get_review_tools
             from .write_tools import get_write_tools
 
             # Pass the host's event-bus seam (ADR 0039) when it exists so PR lifecycle
             # events broadcast as `github.pr.opened` / `github.pr.merged`. hasattr-guarded
             # like the other host couplings — an older host just gets no events.
-            write = get_write_tools(current_default_repo, emit=getattr(registry, "emit", None)) + get_review_tools(
-                current_default_repo
+            write = (
+                get_write_tools(current_default_repo, emit=getattr(registry, "emit", None))
+                + get_review_tools(current_default_repo)
+                + get_release_write_tools(current_default_repo)
             )
             for t in write:
                 registry.register_tool(t)

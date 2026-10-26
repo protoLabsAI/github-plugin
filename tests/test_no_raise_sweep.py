@@ -58,6 +58,19 @@ _ARGS: dict[str, dict] = {
     "github_review_comment": {"repo": "o/n", "number": 1, "body": "b"},
     "github_review_approve": {"repo": "o/n", "number": 1, "body": "b"},
     "github_review_request_changes": {"repo": "o/n", "number": 1, "body": "b"},
+    "github_run_jobs": {"repo": "o/n", "run_id": 1},
+    "github_release": {"repo": "o/n", "tag": "v1.0.0"},
+    "github_release_asset": {"repo": "o/n", "tag": "v1.0.0", "name": "x"},
+    "github_dispatch_workflow": {"repo": "o/n", "workflow": "release.yml", "inputs": "bump=minor", "confirm": True},
+    "github_create_tag": {"repo": "o/n", "tag": "v1.0.0", "sha": "a" * 40, "confirm": True},
+    "github_edit_release": {"repo": "o/n", "tag": "v1.0.0", "notes": "n", "confirm": True},
+    "github_upload_release_asset": {
+        "repo": "o/n",
+        "tag": "v1.0.0",
+        "name": "release-notes.md",
+        "content": "c",
+        "confirm": True,
+    },
 }
 
 # What a stubbed `gh` hands back: (rc, stdout, stderr). Every tool must turn each
@@ -116,6 +129,7 @@ def _patch_all(fake):
         "ghplugin.status.run_gh",
         "ghplugin.gh_issue.run_gh",
         "ghplugin.api.run_gh",
+        "ghplugin.release_tools.run_gh",
     ]
     patches = [patch(t, fake) for t in targets]
     for p in patches:

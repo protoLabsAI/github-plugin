@@ -27,6 +27,9 @@ READ_TOOLS = {
     "github_issue_comments",
     "github_review_threads",  # list resolvable review threads (v0.9.0)
     "github_search_issues",
+    "github_run_jobs",  # the release verbs (v0.10.0)
+    "github_release",
+    "github_release_asset",
 }
 WRITE_TOOLS = {
     "github_create_issue",
@@ -41,6 +44,10 @@ WRITE_TOOLS = {
     "github_set_assignees",
     "github_reply_thread",
     "github_resolve_thread",
+    "github_dispatch_workflow",  # the release verbs (v0.10.0)
+    "github_create_tag",
+    "github_edit_release",
+    "github_upload_release_asset",
 }
 
 
@@ -191,15 +198,15 @@ async def test_configured_default_repo_skips_the_picker_computation(make_registr
 
 
 def test_inventory_counts_match_the_docs(make_registry):
-    """README / PROTO.md say 16 read / 12 write / 3 review = 31. Recount from what
+    """README / PROTO.md say 19 read / 16 write / 3 review = 38. Recount from what
     register() actually produces so the docs can't drift from the code again."""
     reg = make_registry({"write": True})
     register(reg)
     names = set(reg.tool_names)
     review = {"github_review_comment", "github_review_approve", "github_review_request_changes"}
-    assert len(READ_TOOLS) == 16 and len(WRITE_TOOLS) == 12 and len(review) == 3
-    assert names == READ_TOOLS | WRITE_TOOLS | review and len(names) == 31
+    assert len(READ_TOOLS) == 19 and len(WRITE_TOOLS) == 16 and len(review) == 3
+    assert names == READ_TOOLS | WRITE_TOOLS | review and len(names) == 38
     root = Path(__file__).resolve().parent.parent
-    assert "16 read / 12 write / 3 review = 31" in (root / "PROTO.md").read_text(), "PROTO.md inventory stale"
+    assert "19 read / 16 write / 3 review = 38" in (root / "PROTO.md").read_text(), "PROTO.md inventory stale"
     readme = (root / "README.md").read_text()
-    assert "**Read** (always, 16)" in readme and "31 tools in all" in readme, "README inventory stale"
+    assert "**Read** (always, 19)" in readme and "38 tools in all" in readme, "README inventory stale"
