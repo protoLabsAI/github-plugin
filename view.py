@@ -135,6 +135,8 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   #drawer-tabs{padding:0 12px;border-bottom:1px solid var(--pl-color-border)}
   #drawer-body{padding:12px;overflow:auto;min-height:0;overflow-wrap:anywhere}
   .pr-body{white-space:pre-wrap;margin-top:16px}
+  .conversation-item{padding:10px 0;border-bottom:1px solid var(--pl-color-border)}
+  .thread-hunk{font-family:var(--pl-font-mono,monospace);font-size:11px;white-space:pre-wrap}
   .pr-facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
   .pr-facts dd{margin:0}
   /* Checks + Files tabs (bd-nm78.5) — dots reuse the list palette; diff tints from --pl-* with fallbacks. */
@@ -257,6 +259,7 @@ __SETUP_CSS__
     checks: {label: "Checks", path: DET+"/checks", render: prChecks, poll: 15000},
     // The diff rarely changes — poll it no faster than 30s (bd-nm78.5 acceptance).
     files: {label: "Files", path: DET+"/diff", render: prFiles, poll: 30000},
+    conversation: {label: "Conversation", path: DET+"/conversation", render: prConversation, poll: 15000},
   };
   let drawerId = 0, drawerSeq = 0, drawer = null, drawerTimer = null, drawerLast = "";
   let drawerOpener = null;
@@ -265,8 +268,58 @@ __SETUP_CSS__
       + '<dt>Branches</dt><dd>'+esc(it.headRefName)+' → '+esc(it.baseRefName)+'</dd>'
       + '<dt>Created</dt><dd>'+esc(fmtDate(it.createdAt))+'</dd>'
       + '<dt>Updated</dt><dd>'+esc(fmtDate(it.updatedAt))+'</dd></dl>'
+      + '<p class="reviewers">'+reviewerSummary(it)+'</p>'
       + '<div class="pr-body">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '');
+  }
+  function reviewState(state){
+    return state === "APPROVED" ? "approved" : state === "CHANGES_REQUESTED" ? "changes requested" : "commented";
+  }
+  function reviewerSummary(it){
+    const reviews = Array.isArray(it.latestReviews) ? it.latestReviews : [];
+    const requests = Array.isArray(it.reviewRequests) ? it.reviewRequests : [];
+    return reviews.map(r => esc((r.author && r.author.login)||"?")+" "
+      + (r.state==="APPROVED" ? "✓ " : r.state==="CHANGES_REQUESTED" ? "✗ " : "")+reviewState(r.state))
+      .concat(requests.map(r => esc(r.login||r.name||r.slug||"?")+" requested")).join(" · ") || "No reviewers yet.";
+  }
+  function relativeTime(iso){
+    const seconds = Math.max(0, Math.floor((Date.now()-Date.parse(iso))/1000));
+    if(!Number.isFinite(seconds)) return "";
+    if(seconds < 60) return "just now";
+    if(seconds < 3600) return Math.floor(seconds/60)+"m ago";
+    if(seconds < 86400) return Math.floor(seconds/3600)+"h ago";
+    return Math.floor(seconds/86400)+"d ago";
+  }
+  function conversationItem(c, review=false){
+    const fallback = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/pull/"+encodeURIComponent(drawer.number);
+    // Escape attributes AND reject executable URL schemes in the bearer-holding iframe.
+    const href = typeof c.url === "string" && c.url.startsWith("https://") ? c.url : fallback;
+    const author = typeof c.author === "string" ? c.author : (c.author && c.author.login)||"?";
+    return '<article class="conversation-item"><div class="meta">'+esc(author)+' · '+esc(relativeTime(c.submittedAt||c.createdAt))
+      + (review ? ' <span class="pill">'+esc(reviewState(c.state))+'</span>' : '')
+      + ' <a class="lnk" href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">↗</a></div>'
+      + '<div class="pr-body">'+esc(c.body||"")+'</div>'
+      + (c.truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '')+'</article>';
+  }
+  function prConversation(data){
+    const comments = Array.isArray(data.comments) ? data.comments : [];
+    const reviews = Array.isArray(data.reviews) ? data.reviews : [];
+    const timeline = comments.map(c => ({item:c, review:false, date:c.createdAt}))
+      .concat(reviews.filter(r => r.body || r.state!=="COMMENTED").map(r => ({item:r, review:true, date:r.submittedAt})))
+      .sort((a,b) => (Date.parse(a.date)||0)-(Date.parse(b.date)||0));
+    const threads = (Array.isArray(data.threads) ? data.threads : []).slice()
+      .sort((a,b) => Number(!!a.isResolved)-Number(!!b.isResolved));
+    return (timeline.map(t => conversationItem(t.item,t.review)).join("") || '<p>No comments or reviews.</p>')
+      + '<h3>Review threads</h3>' + (threads.map(t => {
+        if(!drawer.threadOpen.has(t.id)) drawer.threadOpen.set(t.id,!t.isResolved);
+        const open = drawer.threadOpen.get(t.id), comments = Array.isArray(t.comments) ? t.comments : [];
+        return '<section class="review-thread"><button type="button" class="file-head" data-thread="'+esc(t.id)+'" aria-expanded="'+open+'">'
+          + esc(t.path)+':'+esc(t.line == null ? "?" : t.line)
+          + (t.isResolved ? ' <span class="pill">resolved</span>' : '')
+          + (t.isOutdated ? ' <span class="pill">outdated</span>' : '')+'</button>'
+          + (open ? (comments[0] && comments[0].diffHunk ? '<pre class="thread-hunk">'+esc(comments[0].diffHunk)+'</pre>' : '')
+            + comments.map(c => conversationItem(c)).join("") : '')+'</section>';
+      }).join("") || '<p>No review threads.</p>');
   }
   function prFilesHref(){
     // Built from the requested identity — never trust an API URL scheme (same as the header link).
@@ -353,7 +406,8 @@ __SETUP_CSS__
   }
   function renderDrawerTabs(){
     $("drawer-tabs").innerHTML = Object.entries(DRAWER_TABS).map(([t, spec]) => {
-      const badge = (t==="checks" && drawer.checksFail) ? '<span class="chk-badge">'+esc(drawer.checksFail)+'</span>' : '';
+      const count = t==="checks" ? drawer.checksFail : t==="conversation" ? drawer.unresolved : 0;
+      const badge = count > 0 ? '<span class="chk-badge">'+esc(count)+'</span>' : '';
       return '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="tab"'
         + ' aria-selected="'+(t===drawer.tab)+'" aria-controls="drawer-body" tabindex="'+(t===drawer.tab?0:-1)+'"'
         + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+badge+'</button>';
@@ -392,6 +446,10 @@ __SETUP_CSS__
       const fail = (data.summary && data.summary.fail) || 0;
       if(fail !== drawer.checksFail){ drawer.checksFail = fail; renderDrawerTabs(); }
     }
+    if(active === "conversation" && !data.error){
+      const count = (data.counts && data.counts.unresolved) || 0;
+      if(count !== drawer.unresolved){ drawer.unresolved = count; renderDrawerTabs(); }
+    }
     drawer.lastData = data;
     renderDrawerBody();
   }
@@ -404,7 +462,7 @@ __SETUP_CSS__
     $("drawer-meta").innerHTML = '<span class="pill">'+esc(pill)+'</span> <a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
   }
   // Re-render the active tab's body from the last snapshot — called by the poller AND by the
-  // in-body toggles (log / file expand), so a toggle survives the next unchanged-snapshot poll.
+  // in-body toggles (log / file / thread expand), so a toggle survives the next unchanged-snapshot poll.
   function renderDrawerBody(){
     if(!drawer) return;
     const spec = DRAWER_TABS[drawer.tab], data = drawer.lastData, body = $("drawer-body"), top = body.scrollTop;
@@ -453,9 +511,9 @@ __SETUP_CSS__
     drawerTimer = setInterval(pollDrawer, (spec && spec.poll) || 15000);
   }
   function openDrawer(repo, number, opener){
-    // checkLogs / filesOpen / checksFail hold the Checks-log + Files-expand state so a
-    // polling re-render keeps them; they're per-drawer, reset on each open.
-    drawer = {id: ++drawerId, repo, number, tab: "overview", lastData: undefined, checkLogs: {}, checksFail: 0, filesInit: false, filesOpen: new Set()};
+    // Logs, expansion choices, and tab counts survive polling re-renders;
+    // they're per-drawer, reset on each open.
+    drawer = {id: ++drawerId, repo, number, tab: "overview", lastData: undefined, checkLogs: {}, checksFail: 0, filesInit: false, filesOpen: new Set(), threadOpen: new Map(), unresolved: 0};
     drawerLast = ""; drawerOpener = opener;
     $("drawer-title").innerHTML = '#'+esc(number)+' Pull request';
     $("drawer-meta").innerHTML = "";
@@ -505,6 +563,11 @@ __SETUP_CSS__
   $("drawer-body").addEventListener("click", (e) => {
     const logBtn = e.target.closest("[data-run-id]");
     if(logBtn){ toggleCheckLog(logBtn.getAttribute("data-run-id")); return; }
+    const threadBtn = e.target.closest("[data-thread]");
+    if(threadBtn){
+      const id = threadBtn.getAttribute("data-thread");
+      drawer.threadOpen.set(id,!drawer.threadOpen.get(id)); renderDrawerBody(); return;
+    }
     const fileBtn = e.target.closest("[data-file]");
     if(fileBtn){ toggleFile(Number(fileBtn.getAttribute("data-file"))); }
   });
