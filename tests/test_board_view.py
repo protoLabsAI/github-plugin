@@ -515,7 +515,7 @@ function element(id){
     set innerHTML(v){this.html=v; this.writes++;}, get innerHTML(){return this.html||'';},
     setAttribute(k,v){this.attrs[k]=v;}, getAttribute(k){return this.attrs[k];},
     addEventListener(k,v){this.handlers[k]=v;}, focus(){document.activeElement=this;},
-    querySelectorAll(){return Object.keys(DRAWER_TABS).map(t => {
+    querySelectorAll(){return Object.keys((drawer && drawer.tabs) ? drawer.tabs : DRAWER_TABS).map(t => {
       const el=element('dtab-'+t); el.attrs['data-drawer-tab']=t; return el;
     });}
   });
@@ -875,6 +875,160 @@ def test_conversation_timeline_threads_summary_and_polling():
   pollDrawer(); await reply(latest(),{});
   assert.ok(element('drawer-body').innerHTML.includes('No review threads.'));
   closeDrawer();
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+# --- bd-nm78.7: the issue drawer (issue mode reuses the PR drawer machinery) ----
+
+
+def test_issue_drawer_reuses_one_drawer_and_poller_and_is_read_only():
+    """r1/r2/r5 (static) — issue rows open the SAME drawer in issue mode via /detail/issue,
+    reusing the single drawer element + one fenced poller, and the drawer stays read-only."""
+    from ghplugin.view import PAGE
+
+    assert 'const ISS = "/api/plugins/github/detail/issue"' in PAGE  # the issue data route
+    assert "const ISSUE_TABS = {" in PAGE  # issue tab set reuses the shared tablist
+    assert 'overview: {label: "Overview", path: ISS' in PAGE
+    assert 'comments: {label: "Comments", path: ISS' in PAGE
+    # a plain click on an issue row opens the issue drawer (modified clicks keep the href)
+    assert "openIssueDrawer(issueRowEl.dataset.repo, issueRowEl.dataset.issue, issueRowEl)" in PAGE
+    assert 'data-issue="' in PAGE
+    # ONE drawer element and ONE poller serve both modes — not a copied second drawer/poller
+    assert PAGE.count('<div id="drawer"') == 1
+    assert PAGE.count("setInterval(pollDrawer") == 1
+    # read-only everywhere, issue mode included
+    assert "POST" not in PAGE
+    assert '/api/plugins/github/issue"' not in PAGE  # no create-issue route from the board
+    for forbidden in ('"PUT"', '"DELETE"', '"PATCH"', "method:"):
+        assert forbidden not in PAGE
+
+
+def test_issue_drawer_escapes_sources_and_renders_linked_pr_chips():
+    """r3/r5 (static) — every GitHub-sourced issue string passes through esc(), the Comments tab
+    carries a count badge, and linked PRs are chips."""
+    from ghplugin.view import PAGE
+
+    for fragment in (
+        'esc(it.body||"")',  # body as escaped pre-wrap text
+        "esc(it.milestone.title)",
+        "esc((a && a.login)",  # assignees
+        "esc(data.title)",  # issue header title
+        "esc(data.number)",
+        "esc(p.number)",  # linked-PR chip
+    ):
+        assert fragment in PAGE
+    assert 'data-linked-pr="' in PAGE  # the linked-PR chip
+    assert 'class="d-count"' in PAGE  # the Comments count badge
+    assert "Open on GitHub ↗" in PAGE
+    assert ".pr-body{white-space:pre-wrap" in PAGE  # body is plain pre-wrap, never markdown
+    for forbidden in ("marked", "markdown-it", "renderMarkdown", "innerHTML = it.body"):
+        assert forbidden not in PAGE
+
+
+def test_issue_drawer_interactions_open_tabs_linked_prs_and_missing_fields():
+    """r1-r4 (dynamic) — plain vs modified click, Overview + Comments on one fenced poller, the
+    header state/stateReason pill, the comment count, a linked-PR chip switching to PR mode, and
+    missing optional fields rendering without error."""
+    _run_drawer_js(
+        r"""
+(async()=>{
+  const hostile = '<img src=x onerror=alert(1)>';
+  const issue = {number:12,title:hostile,state:'CLOSED',stateReason:'NOT_PLANNED',author:{login:hostile},
+    body:hostile,createdAt:'2026-01-01',updatedAt:'2026-01-02',labels:[{name:hostile}],
+    assignees:[{login:hostile}],milestone:{title:hostile},
+    closedByPullRequestsReferences:[{number:34,repository:{owner:{login:'o'},name:'n'},url:'https://github.com/o/n/pull/34'}],
+    comments:[{author:{login:hostile},body:'c-late',createdAt:'2026-01-05',url:'https://github.com/o/n/issues/12#c2'},
+              {author:{login:hostile},body:'c-early',createdAt:'2026-01-03',url:'https://github.com/o/n/issues/12#c1'}],
+    body_truncated:true};
+  // Only data-issue closes match (the handler probes data-pr first, then data-issue).
+  const issueEl = element('issue-row'); issueEl.dataset={repo:'o/n',issue:'12'};
+  const click = (opts={})=>{
+    let prevented=false;
+    element('list').handlers.click({button:0,target:{closest:(sel)=>sel.includes('data-issue')?issueEl:null},
+      preventDefault(){prevented=true;},...opts});
+    return prevented;
+  };
+  // A modified / middle / already-handled click never opens the drawer — the href is followed.
+  for(const opts of [{ctrlKey:true},{metaKey:true},{shiftKey:true},{altKey:true},{button:1},{defaultPrevented:true}]){
+    assert.equal(click(opts),false);
+  }
+  assert.equal(requests.length,0);
+  // A plain click opens the drawer in ISSUE mode and fetches /detail/issue through the one poller.
+  assert.equal(click(),true);
+  assert.equal(drawer.mode,'issue');
+  assert.deepEqual(Object.keys(drawer.tabs),['overview','comments']);
+  assert.equal(requests[0].path,'/api/plugins/github/detail/issue?repo=o%2Fn&number=12');
+  assert.equal(timers.size,1); assert.equal(lastIntervalMs,15000);
+  assert.equal(element('drawer').hidden,false);
+  const did = drawer.id;
+  await reply(0,issue);
+  // Header: #N title (escaped), closed + stateReason pill, Open-on-GitHub to the issues URL.
+  assert.ok(element('drawer-title').innerHTML.includes('#12'));
+  assert.ok(element('drawer-title').innerHTML.includes('&lt;img') && !element('drawer-title').innerHTML.includes('<img'));
+  assert.ok(element('drawer-meta').innerHTML.includes('closed · not planned'));
+  assert.ok(element('drawer-meta').innerHTML.includes('https://github.com/o/n/issues/12'));
+  assert.ok(element('drawer-meta').innerHTML.includes('Open on GitHub'));
+  // Overview: author/dates/assignees/milestone/labels, escaped body + truncated note, linked-PR chip.
+  let html = element('drawer-body').innerHTML;
+  for(const dt of ['Author','Created','Updated','Assignees','Milestone','Labels'])
+    assert.ok(html.includes('>'+dt+'</dt>'),dt);
+  assert.ok(html.includes('&lt;img') && !html.includes('<img'));
+  assert.ok(html.includes('Body truncated'));
+  assert.ok(html.includes('data-linked-pr="34"'));
+  // The Comments tab label carries a live count.
+  assert.ok(element('drawer-tabs').innerHTML.includes('Comments<span class="d-count">2</span>'));
+  // Arrow keys move across the issue tablist (same keyboard machinery as PR mode).
+  for(const [key,want] of [['ArrowRight','comments'],['ArrowRight','overview'],['End','comments'],['Home','overview']]){
+    let prevented=false;
+    element('drawer-tabs').handlers.keydown({key,preventDefault(){prevented=true;}});
+    assert.equal(drawer.tab,want); assert.equal(prevented,true);
+    assert.equal(document.activeElement.id,'dtab-'+want);
+  }
+  // Switch to Comments — SAME endpoint, SAME one poller/drawer; chronological, escaped, each ↗ linked.
+  selectDrawerTab('comments',false);
+  assert.equal(drawer.tab,'comments'); assert.equal(drawer.id,did); assert.equal(timers.size,1);
+  assert.ok(requests[latest()].path.startsWith('/api/plugins/github/detail/issue?repo=o%2Fn&number=12'));
+  await reply(latest(),issue);
+  html = element('drawer-body').innerHTML;
+  assert.ok(html.indexOf('c-early') < html.indexOf('c-late'));  // chronological
+  assert.ok(html.includes('href="https://github.com/o/n/issues/12#c1"'));
+  assert.ok(html.includes('&lt;img') && !html.includes('<img'));
+  // A linked-PR chip switches THIS drawer to that PR (same repo), opening on Overview, one poller.
+  selectDrawerTab('overview',false); await reply(latest(),issue);
+  bodyClick({'data-linked-pr':'34'});
+  assert.equal(drawer.mode,'pr'); assert.equal(drawer.number,'34'); assert.equal(drawer.tab,'overview');
+  assert.deepEqual(Object.keys(drawer.tabs),['overview','checks','files','conversation']);
+  assert.equal(timers.size,1);
+  assert.ok(requests[latest()].path.startsWith('/api/plugins/github/detail/pr?repo=o%2Fn&number=34'));
+  await reply(latest(),{number:34,title:'PR!',state:'OPEN',author:{login:'kj'},
+    headRefName:'f',baseRefName:'main',body:'b',createdAt:'2026-01-01',updatedAt:'2026-01-02'});
+  assert.ok(element('drawer-title').innerHTML.includes('#34 PR!'));
+  assert.ok(element('drawer-meta').innerHTML.includes('/pull/34'));
+  // Missing optional fields (stateReason, milestone, assignees, labels, linked PRs) render cleanly.
+  closeDrawer(); openIssueDrawer('o/n','99',issueEl);
+  await reply(latest(),{number:99,title:'Bare',state:'OPEN',author:{login:'kj'},body:'',
+    createdAt:'2026-01-01',updatedAt:'2026-01-02',comments:[]});
+  html = element('drawer-body').innerHTML;
+  assert.ok(html.includes('>Author</dt>'));
+  for(const absent of ['Assignees','Milestone','Labels'])
+    assert.ok(!html.includes('>'+absent+'</dt>'),absent);
+  assert.ok(!html.includes('Linked pull requests'));
+  assert.ok(element('drawer-meta').innerHTML.includes('>open<'));  // plain state pill, no reason
+  assert.ok(element('drawer-tabs').innerHTML.includes('Comments<span class="d-count">0</span>'));
+  selectDrawerTab('comments',false);
+  await reply(latest(),{number:99,title:'Bare',state:'OPEN',comments:[]});
+  assert.ok(element('drawer-body').innerHTML.includes('No comments.'));
+  // Escape closes the issue drawer and returns focus to the opener row.
+  openIssueDrawer('o/n','12',issueEl);
+  events.keydown({key:'Escape',preventDefault(){}});
+  assert.equal(drawer,null); assert.equal(timers.size,0); assert.equal(document.activeElement,issueEl);
+  // issueRow carries data-issue/data-repo + keeps its href (modified-click fallback), never data-pr.
+  assert.ok(issueRow(issue,'o/n').includes('data-issue="12"'));
+  assert.ok(issueRow(issue,'o/n').includes('data-repo="o/n"'));
+  assert.ok(issueRow(issue,'o/n').includes('target="_blank"'));
+  assert.ok(!issueRow(issue,'o/n').includes('data-pr='));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     )

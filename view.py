@@ -169,6 +169,15 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .dl.del{background:var(--pl-color-danger-muted,#f8514926)}
   .dl.hunk{color:var(--pl-color-fg-muted)}
   .note{padding:6px 8px 10px;color:var(--pl-color-fg-muted);font-size:12px}
+  /* Issue drawer (bd-nm78.7) — neutral count badge + linked-PR chips. */
+  .d-count{margin-left:5px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;
+    background:var(--pl-color-bg);border:1px solid var(--pl-color-border);color:var(--pl-color-fg-muted)}
+  .linked-prs{margin-top:14px}
+  .linked-prs h3{font-size:13px;margin:0 0 6px}
+  .chip{display:inline-block;margin:0 5px 5px 0;padding:2px 9px;border-radius:999px;cursor:pointer;
+    font:inherit;font-size:12px;background:var(--pl-color-bg);border:1px solid var(--pl-color-border);
+    color:var(--pl-color-accent,#2f81f7)}
+  .chip:hover{text-decoration:underline}
 __SETUP_CSS__
 </style></head><body>
 <div id="wrap">
@@ -228,12 +237,14 @@ __SETUP_CSS__
   function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); load(); }
   function labelPills(labels){ return (labels||[]).slice(0,5).map(l => '<span class="pill">'+esc(l.name||l)+'</span>').join(" "); }
 
-  function issueRow(it){
+  function issueRow(it, repo){
     const st = (it.state||"").toLowerCase();
     // `gh issue list --json comments` returns an ARRAY of comment objects, not a count —
     // rendering it directly was the "[object Object]" bug (#16). Show its length.
     const cc = Array.isArray(it.comments) ? it.comments.length : (Number(it.comments)||0);
-    return '<a class="row" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
+    // data-issue/data-repo let a plain click open the drawer (bd-nm78.7); the href stays so a
+    // modified (cmd/ctrl/middle) click still follows through to github.com — same split as PR rows.
+    return '<a class="row" data-issue="'+esc(it.number)+'" data-repo="'+esc(repo)+'" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
       + '<div class="top"><span class="dot '+(st==="closed"?"closed":"open")+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
       + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
@@ -261,6 +272,13 @@ __SETUP_CSS__
     files: {label: "Files", path: DET+"/diff", render: prFiles, poll: 30000},
     conversation: {label: "Conversation", path: DET+"/conversation", render: prConversation, poll: 15000},
   };
+  // Issue mode reuses the SAME drawer, tablist and fenced poller (bd-nm78.7). Both tabs read the
+  // ONE /detail/issue endpoint (body + comments arrive together), so there's no second poller.
+  const ISS = "/api/plugins/github/detail/issue";
+  const ISSUE_TABS = {
+    overview: {label: "Overview", path: ISS, render: issueOverview, poll: 15000},
+    comments: {label: "Comments", path: ISS, render: issueComments, poll: 15000},
+  };
   let drawerId = 0, drawerSeq = 0, drawer = null, drawerTimer = null, drawerLast = "";
   let drawerOpener = null;
   function prOverview(it){
@@ -271,6 +289,44 @@ __SETUP_CSS__
       + '<p class="reviewers">'+reviewerSummary(it)+'</p>'
       + '<div class="pr-body">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '');
+  }
+  // --- issue mode (bd-nm78.7) -------------------------------------------------
+  function issueOverview(it){
+    const assignees = (Array.isArray(it.assignees) ? it.assignees : [])
+      .map(a => esc((a && a.login) || a || "?")).join(", ");
+    const labels = labelPills(it.labels);
+    const facts = '<dl class="pr-facts"><dt>Author</dt><dd>'+esc((it.author&&it.author.login)||"?")+'</dd>'
+      + '<dt>Created</dt><dd>'+esc(fmtDate(it.createdAt))+'</dd>'
+      + '<dt>Updated</dt><dd>'+esc(fmtDate(it.updatedAt))+'</dd>'
+      + (assignees ? '<dt>Assignees</dt><dd>'+assignees+'</dd>' : '')
+      + (it.milestone && it.milestone.title ? '<dt>Milestone</dt><dd>'+esc(it.milestone.title)+'</dd>' : '')
+      + (labels ? '<dt>Labels</dt><dd>'+labels+'</dd>' : '')+'</dl>';
+    // closedByPullRequestsReferences carries no title on current gh — the chip shows #N (and a
+    // title only if a future gh adds one). Clicking switches this same drawer to that PR (same repo).
+    const prs = (Array.isArray(it.closedByPullRequestsReferences) ? it.closedByPullRequestsReferences : [])
+      .filter(p => p && p.number != null);
+    const linked = prs.length
+      ? '<div class="linked-prs"><h3>Linked pull requests</h3>'
+        + prs.map(p => '<button type="button" class="chip" data-linked-pr="'+esc(p.number)+'">#'
+            + esc(p.number)+(p.title ? ' '+esc(p.title) : '')+'</button>').join("")+'</div>'
+      : '';
+    return facts + linked
+      + '<div class="pr-body">'+esc(it.body||"")+'</div>'
+      + (it.body_truncated ? '<p>Body truncated — see GitHub.</p>' : '');
+  }
+  function issueComments(data){
+    // Chronological, each with a ↗ link — reuses conversationItem (mode-aware fallback href).
+    const comments = (Array.isArray(data.comments) ? data.comments : []).slice()
+      .sort((a,b) => (Date.parse(a.createdAt)||0)-(Date.parse(b.createdAt)||0));
+    return comments.map(c => conversationItem(c)).join("") || '<p>No comments.</p>';
+  }
+  function updateIssueHeader(data){
+    const state = String(data.state||"").toLowerCase()==="closed" ? "closed" : "open";
+    const reason = data.stateReason ? String(data.stateReason).toLowerCase().replace(/_/g," ") : "";
+    $("drawer-title").innerHTML = '#'+esc(data.number)+' '+esc(data.title);
+    const href = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/issues/"+encodeURIComponent(drawer.number);
+    $("drawer-meta").innerHTML = '<span class="pill">'+esc(reason ? state+" · "+reason : state)+'</span> '
+      + '<a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
   }
   function reviewState(state){
     return state === "APPROVED" ? "approved" : state === "CHANGES_REQUESTED" ? "changes requested" : "commented";
@@ -291,7 +347,8 @@ __SETUP_CSS__
     return Math.floor(seconds/86400)+"d ago";
   }
   function conversationItem(c, review=false){
-    const fallback = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/pull/"+encodeURIComponent(drawer.number);
+    const seg = drawer.mode === "issue" ? "issues" : "pull";
+    const fallback = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/"+seg+"/"+encodeURIComponent(drawer.number);
     // Escape attributes AND reject executable URL schemes in the bearer-holding iframe.
     const href = typeof c.url === "string" && c.url.startsWith("https://") ? c.url : fallback;
     const author = typeof c.author === "string" ? c.author : (c.author && c.author.login)||"?";
@@ -404,18 +461,22 @@ __SETUP_CSS__
     }).join("");
     return head + rows;
   }
+  function tabBadge(t){
+    // Comments carries a neutral count (even 0, once loaded); checks/conversation keep the alert badge.
+    if(t==="comments") return drawer.commentCount == null ? "" : '<span class="d-count">'+esc(drawer.commentCount)+'</span>';
+    const count = t==="checks" ? drawer.checksFail : t==="conversation" ? drawer.unresolved : 0;
+    return count > 0 ? '<span class="chk-badge">'+esc(count)+'</span>' : '';
+  }
   function renderDrawerTabs(){
-    $("drawer-tabs").innerHTML = Object.entries(DRAWER_TABS).map(([t, spec]) => {
-      const count = t==="checks" ? drawer.checksFail : t==="conversation" ? drawer.unresolved : 0;
-      const badge = count > 0 ? '<span class="chk-badge">'+esc(count)+'</span>' : '';
+    $("drawer-tabs").innerHTML = Object.entries(drawer.tabs).map(([t, spec]) => {
       return '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="tab"'
         + ' aria-selected="'+(t===drawer.tab)+'" aria-controls="drawer-body" tabindex="'+(t===drawer.tab?0:-1)+'"'
-        + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+badge+'</button>';
+        + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+tabBadge(t)+'</button>';
     }).join("");
     $("drawer-body").setAttribute("aria-labelledby", "dtab-"+drawer.tab);
   }
   function selectDrawerTab(t, focus){
-    if(!drawer || !Object.hasOwn(DRAWER_TABS, t)) return;
+    if(!drawer || !Object.hasOwn(drawer.tabs, t)) return;
     if(t !== drawer.tab){
       drawer.tab = t; ++drawerSeq; drawerLast = ""; drawer.lastData = undefined;
       renderDrawerTabs();
@@ -428,27 +489,37 @@ __SETUP_CSS__
   async function pollDrawer(){
     if(!drawer || document.hidden) return;
     const id = drawer.id, seq = ++drawerSeq, active = drawer.tab;
-    const spec = DRAWER_TABS[active];
+    const spec = drawer.tabs[active];
     let data;
     try {
       const response = await kit.apiFetch(spec.path+"?repo="+encodeURIComponent(drawer.repo)+"&number="+encodeURIComponent(drawer.number));
-      data = response.ok ? await response.json() : {error: "Could not load pull request."};
+      data = response.ok ? await response.json() : {error: "Could not load this "+(drawer.mode==="issue"?"issue":"pull request")+"."};
     } catch(e){ data = {error: "Failed to load — is the agent reachable?"}; }
     if(!drawer || drawer.id !== id || seq !== drawerSeq || document.hidden) return;
     const sig = JSON.stringify(data);
     if(sig === drawerLast) return;
     drawerLast = sig;
-    // Only the Overview response carries the PR's identity (title/state); the Checks and
-    // Files responses have their own shapes, so they leave the header untouched.
-    if(active === "overview" && !data.error) updatePrHeader(data);
-    // The Checks tab label carries a fail-count badge; refresh it when the count changes.
-    if(active === "checks" && !data.error){
-      const fail = (data.summary && data.summary.fail) || 0;
-      if(fail !== drawer.checksFail){ drawer.checksFail = fail; renderDrawerTabs(); }
-    }
-    if(active === "conversation" && !data.error){
-      const count = (data.counts && data.counts.unresolved) || 0;
-      if(count !== drawer.unresolved){ drawer.unresolved = count; renderDrawerTabs(); }
+    if(!data.error){
+      if(drawer.mode === "issue"){
+        // Both issue tabs return the whole object, so the header refreshes from either; the
+        // Comments tab label carries a live count.
+        updateIssueHeader(data);
+        const n = Array.isArray(data.comments) ? data.comments.length : 0;
+        if(n !== drawer.commentCount){ drawer.commentCount = n; renderDrawerTabs(); }
+      } else {
+        // Only the Overview response carries the PR's identity (title/state); the Checks and
+        // Files responses have their own shapes, so they leave the header untouched.
+        if(active === "overview") updatePrHeader(data);
+        // The Checks tab label carries a fail-count badge; refresh it when the count changes.
+        if(active === "checks"){
+          const fail = (data.summary && data.summary.fail) || 0;
+          if(fail !== drawer.checksFail){ drawer.checksFail = fail; renderDrawerTabs(); }
+        }
+        if(active === "conversation"){
+          const count = (data.counts && data.counts.unresolved) || 0;
+          if(count !== drawer.unresolved){ drawer.unresolved = count; renderDrawerTabs(); }
+        }
+      }
     }
     drawer.lastData = data;
     renderDrawerBody();
@@ -465,7 +536,7 @@ __SETUP_CSS__
   // in-body toggles (log / file / thread expand), so a toggle survives the next unchanged-snapshot poll.
   function renderDrawerBody(){
     if(!drawer) return;
-    const spec = DRAWER_TABS[drawer.tab], data = drawer.lastData, body = $("drawer-body"), top = body.scrollTop;
+    const spec = drawer.tabs[drawer.tab], data = drawer.lastData, body = $("drawer-body"), top = body.scrollTop;
     if(data === undefined){ body.innerHTML = '<div class="hint">Loading…</div>'; return; }
     if(data.error){ body.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
     body.innerHTML = spec.render(data);
@@ -507,18 +578,23 @@ __SETUP_CSS__
     stopDrawerPolling();
     if(!drawer || document.hidden) return;
     pollDrawer();
-    const spec = DRAWER_TABS[drawer.tab];
+    const spec = drawer.tabs[drawer.tab];
     drawerTimer = setInterval(pollDrawer, (spec && spec.poll) || 15000);
   }
-  function openDrawer(repo, number, opener){
-    // Logs, expansion choices, and tab counts survive polling re-renders;
-    // they're per-drawer, reset on each open.
-    drawer = {id: ++drawerId, repo, number, tab: "overview", lastData: undefined, checkLogs: {}, checksFail: 0, filesInit: false, filesOpen: new Set(), threadOpen: new Map(), unresolved: 0};
+  function openDrawerShell(mode, repo, number, opener){
+    // Logs, expansion choices, and tab counts survive polling re-renders; they're per-drawer,
+    // reset on each open. `mode` picks the tab set (DRAWER_TABS for PRs, ISSUE_TABS for issues) —
+    // everything downstream (poller, tablist, header) branches on it, so there's one drawer element.
+    const tabs = mode === "issue" ? ISSUE_TABS : DRAWER_TABS;
+    drawer = {id: ++drawerId, mode, tabs, repo, number, tab: "overview", lastData: undefined,
+      checkLogs: {}, checksFail: 0, filesInit: false, filesOpen: new Set(), threadOpen: new Map(),
+      unresolved: 0, commentCount: null};
     drawerLast = ""; drawerOpener = opener;
-    $("drawer-title").innerHTML = '#'+esc(number)+' Pull request';
+    $("drawer-title").innerHTML = '#'+esc(number)+(mode === "issue" ? ' Issue' : ' Pull request');
     $("drawer-meta").innerHTML = "";
     $("drawer-body").innerHTML = '<div class="hint">Loading…</div>';
     $("drawer-body").scrollTop = 0;
+    $("drawer-tabs").setAttribute("aria-label", mode === "issue" ? "Issue views" : "Pull request views");
     renderDrawerTabs();
     $("drawer").hidden = false;
     $("drawer").classList.add("open"); $("scrim").classList.add("open");
@@ -526,6 +602,8 @@ __SETUP_CSS__
     $("drawer-close").focus();
     startDrawerPolling();
   }
+  function openDrawer(repo, number, opener){ openDrawerShell("pr", repo, number, opener); }
+  function openIssueDrawer(repo, number, opener){ openDrawerShell("issue", repo, number, opener); }
   function closeDrawer(){
     if(!drawer) return;
     drawer = null; ++drawerSeq; drawerLast = "";
@@ -537,10 +615,11 @@ __SETUP_CSS__
   }
   $("list").addEventListener("click", (e) => {
     if(e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    const row = e.target.closest("[data-pr]");
-    if(!row) return;
-    e.preventDefault();
-    openDrawer(row.dataset.repo, row.dataset.pr, row);
+    const prRow = e.target.closest("[data-pr]");
+    if(prRow){ e.preventDefault(); openDrawer(prRow.dataset.repo, prRow.dataset.pr, prRow); return; }
+    const issueRowEl = e.target.closest("[data-issue]");
+    if(issueRowEl){ e.preventDefault(); openIssueDrawer(issueRowEl.dataset.repo, issueRowEl.dataset.issue, issueRowEl); }
+    // Any other (modified) click keeps the row's href → github.com.
   });
   $("drawer-close").onclick = closeDrawer;
   $("scrim").onclick = closeDrawer;
@@ -561,6 +640,12 @@ __SETUP_CSS__
   // Delegated so toggles survive the body's full re-render on each poll (the "details ↗" /
   // "view on GitHub ↗" links carry neither attribute, so they navigate instead of toggling).
   $("drawer-body").addEventListener("click", (e) => {
+    // A linked-PR chip switches THIS drawer to that PR (same repo), opening on Overview.
+    const linkedPr = e.target.closest("[data-linked-pr]");
+    if(linkedPr && drawer){
+      const repo = drawer.repo, opener = drawerOpener;
+      openDrawer(repo, linkedPr.getAttribute("data-linked-pr"), opener); return;
+    }
     const logBtn = e.target.closest("[data-run-id]");
     if(logBtn){ toggleCheckLog(logBtn.getAttribute("data-run-id")); return; }
     const threadBtn = e.target.closest("[data-thread]");
@@ -600,7 +685,7 @@ __SETUP_CSS__
       if(data.error){ list.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
       const items = data.items||[];
       if(!items.length){ list.innerHTML = '<div class="empty">No '+tab+' for this filter.</div>'; return; }
-      list.innerHTML = items.map(it => tab==="issues" ? issueRow(it) : prRow(it, repo)).join("");
+      list.innerHTML = items.map(it => tab==="issues" ? issueRow(it, repo) : prRow(it, repo)).join("");
     } catch(e){ if(my===loadSeq) list.innerHTML = '<div class="empty">Failed to load — is the agent reachable?</div>'; }
   }
 
