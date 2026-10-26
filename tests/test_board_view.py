@@ -500,27 +500,14 @@ def test_drawer_shell_and_plain_text_security_contract():
         assert forbidden not in PAGE
 
 
-def test_drawer_interactions_and_async_lifecycle():
-    """Execute the shipped JS with a small DOM/fetch/timer harness, no host or network.
-
-    Node is optional locally; the static contract and route tests always run in the
-    Python-only gate. When available this also checks races and event behavior.
-    """
-    import shutil
-    import subprocess
-
-    import pytest
-    from ghplugin.view import PAGE
-
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node is required for the JavaScript interaction harness")
-    script = PAGE.split('<script type="module">', 1)[1].split("</script>", 1)[0]
-    script = script[script.index("  const $ =") :].replace("  kit.initPluginView(boot);", "")
-    harness = r"""
+# A tiny DOM / fetch / timer harness so the shipped drawer JS runs with no host or network.
+# `lastIntervalMs` records the most recent poll cadence (15s default, 30s for Files); `latest()`
+# points at the newest fetch; `bodyClick` fires a delegated #drawer-body click whose target
+# matches one attribute selector (the log / file toggles).
+_DRAWER_HARNESS = r"""
 const assert = require('node:assert/strict');
 const elements = new Map(), events = {}, requests = [], timers = new Map();
-let timerId = 0;
+let timerId = 0, lastIntervalMs = 0;
 function element(id){
   if(!elements.has(id)) elements.set(id, {
     id, dataset: {}, handlers: {}, attrs: {}, writes: 0, scrollTop: 0, isConnected: true,
@@ -536,12 +523,46 @@ function element(id){
 }
 const document = {hidden: false, getElementById: element, addEventListener(k,v){events[k]=v;}};
 const kit = {apiFetch(path){return new Promise((resolve,reject)=>requests.push({path,resolve,reject}));}};
-const setInterval = (fn,ms) => {assert.equal(ms,15000); timers.set(++timerId,fn); return timerId;};
+const setInterval = (fn,ms) => {lastIntervalMs = ms; timers.set(++timerId,fn); return timerId;};
 const clearInterval = id => timers.delete(id);
 const flush = async()=>{await Promise.resolve(); await Promise.resolve(); await Promise.resolve();};
 const reply = async(index,data,ok=true)=>{requests[index].resolve({ok,json:async()=>data}); await flush();};
+const latest = () => requests.length - 1;
+const bodyClick = (attrs) => element('drawer-body').handlers.click({target:{closest:(sel)=>{
+  for(const k in attrs){ if(sel.includes(k)) return {getAttribute:(n)=>attrs[n]}; }
+  return null;
+}}});
 """
-    checks = r"""
+
+
+def _run_drawer_js(checks):
+    """Execute the shipped drawer JS (``_DRAWER_HARNESS`` + the page module + ``checks``).
+
+    Node is optional locally; the static contract and route tests always run in the
+    Python-only gate. When available this also checks races, event behavior, and the
+    Checks/Files tab rendering."""
+    import shutil
+    import subprocess
+
+    import pytest
+    from ghplugin.view import PAGE
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for the JavaScript interaction harness")
+    script = PAGE.split('<script type="module">', 1)[1].split("</script>", 1)[0]
+    script = script[script.index("  const $ =") :].replace("  kit.initPluginView(boot);", "")
+    result = subprocess.run(
+        [node, "-"], input=_DRAWER_HARNESS + script + checks, text=True, capture_output=True, timeout=15
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_drawer_interactions_and_async_lifecycle():
+    """Open/close, escaping, snapshot suppression, races, visibility, and arrow-key tab nav
+    across the three real tabs — Files polls slower (30s), Overview/Checks at 15s."""
+    _run_drawer_js(
+        r"""
 (async()=>{
   const hostile = '<img src=x onerror="steal()">&';
   const data = {number:7,title:hostile,state:'OPEN',author:{login:hostile},
@@ -559,7 +580,7 @@ const reply = async(index,data,ok=true)=>{requests[index].resolve({ok,json:async
   element('list').handlers.click({button:0,target:{closest:()=>null},preventDefault(){assert.fail('issue intercepted');}});
   assert.equal(click(),true);
   assert.equal(requests[0].path,'/api/plugins/github/detail/pr?repo=o%2Fn&number=7');
-  assert.equal(timers.size,1);
+  assert.equal(timers.size,1); assert.equal(lastIntervalMs,15000);
   assert.equal(element('drawer').hidden,false);
   await reply(0,data);
   assert.ok(element('drawer-title').innerHTML.includes('&lt;img'));
@@ -586,14 +607,15 @@ const reply = async(index,data,ok=true)=>{requests[index].resolve({ok,json:async
   document.hidden=false; events.visibilitychange(); assert.equal(timers.size,1);
   await reply(7,{error:hostile}); assert.ok(element('drawer-body').innerHTML.includes('&lt;img'));
   pollDrawer(); await reply(8,data); assert.ok(element('drawer-body').innerHTML.includes('Author'));
-  // Add a future tab to verify automatic activation beyond today's single Overview.
-  DRAWER_TABS.checks = {label:'Checks',path:'/checks',render:()=>'<p>Checks</p>'};
-  renderDrawerTabs();
-  for(const [key,want] of [['ArrowRight','checks'],['Home','overview'],['End','checks'],['ArrowRight','overview'],['ArrowLeft','checks']]){
+  // Overview + the two real tabs are keyboard-reachable; Files restarts the poller at 30s.
+  assert.deepEqual(Object.keys(DRAWER_TABS),['overview','checks','files']);
+  for(const [key,want,ms] of [['ArrowRight','checks',15000],['Home','overview',15000],
+      ['End','files',30000],['ArrowRight','overview',15000],['ArrowLeft','files',30000]]){
     let prevented=false;
     element('drawer-tabs').handlers.keydown({key,preventDefault(){prevented=true;}});
     assert.equal(drawer.tab,want); assert.equal(prevented,true);
     assert.equal(document.activeElement.id,'dtab-'+want);
+    assert.equal(lastIntervalMs,ms);
   }
   const pending=requests.length-1;
   events.keydown({key:'Escape',preventDefault(){}});
@@ -609,5 +631,158 @@ const reply = async(index,data,ok=true)=>{requests[index].resolve({ok,json:async
   assert.ok(!issueRow(data).includes('data-pr='));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
-    result = subprocess.run([node, "-"], input=harness + script + checks, text=True, capture_output=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    )
+
+
+def test_drawer_checks_tab_renders_summary_logs_and_badge():
+    """Checks tab: summary, failing-first order, escaped names, a fail-count badge, and a
+    lazily-loaded failure log in an escaped <pre> whose expanded state survives re-renders."""
+    _run_drawer_js(
+        r"""
+(async()=>{
+  const row = element('pr-row'); row.dataset={repo:'o/n',pr:'7'};
+  openDrawer('o/n','7',row);
+  await reply(latest(),{number:7,title:'PR',state:'OPEN',author:{login:'kj'},
+    headRefName:'f',baseRefName:'main',body:'b',createdAt:'2026-01-01',updatedAt:'2026-01-02'});
+  selectDrawerTab('checks',false);
+  assert.equal(DRAWER_TABS.checks.path,'/api/plugins/github/detail/pr/checks');
+  assert.ok(requests[latest()].path.startsWith('/api/plugins/github/detail/pr/checks?repo=o%2Fn&number=7'));
+  const evil = '<b>evil</b>';
+  const checks = {summary:{pass:1,fail:2,pending:0,skipped:1}, checks:[
+    {name:'lint',workflow:'CI',status:'COMPLETED',conclusion:'SUCCESS',url:'https://x/1',
+      started_at:'2026-01-01T00:00:00Z',completed_at:'2026-01-01T00:00:30Z',run_id:null},
+    {name:evil,workflow:'CI',status:'COMPLETED',conclusion:'FAILURE',url:'https://x/2',
+      started_at:'2026-01-01T00:00:00Z',completed_at:'2026-01-01T00:01:05Z',run_id:42},
+    {name:'skip-step',workflow:null,status:'COMPLETED',conclusion:'SKIPPED',url:null,
+      started_at:null,completed_at:null,run_id:null},
+    {name:'deploy',workflow:'CD',status:'COMPLETED',conclusion:'TIMED_OUT',url:'https://x/3',
+      started_at:null,completed_at:null,run_id:99},
+  ]};
+  await reply(latest(),checks);
+  let html = element('drawer-body').innerHTML;
+  assert.ok(html.includes('1</b> passing') && html.includes('2</b> failing'));
+  assert.ok(html.includes('0</b> pending') && html.includes('1</b> skipped'));
+  assert.ok(html.indexOf('evil') < html.indexOf('lint'));   // failing first
+  assert.ok(html.indexOf('deploy') < html.indexOf('lint'));
+  assert.ok(html.includes('&lt;b&gt;evil') && !html.includes('<b>evil'));  // check name escaped
+  assert.ok(html.includes('dot fail') && html.includes('dot pass') && html.includes('dot skipped'));
+  assert.ok(html.includes('1m 5s'));                         // duration
+  assert.ok(element('drawer-tabs').innerHTML.includes('chk-badge">2<'));  // fail-count badge
+  // Lazily fetch the failure log for run 42.
+  const before = requests.length;
+  bodyClick({'data-run-id':'42'});
+  assert.equal(requests.length,before+1);
+  assert.ok(requests[latest()].path.includes('run_id=42'));
+  assert.ok(element('drawer-body').innerHTML.includes('Loading'));
+  await reply(latest(),{log_tail:'ok\n<script>bad()</script>'});
+  html = element('drawer-body').innerHTML;
+  assert.ok(html.includes('<pre class="log">'));
+  assert.ok(html.includes('&lt;script&gt;bad') && !html.includes('<script>bad'));  // log escaped
+  // The expanded log survives a polling re-render (a changed snapshot).
+  pollDrawer();
+  await reply(latest(),{...checks,summary:{pass:1,fail:2,pending:1,skipped:1}});
+  html = element('drawer-body').innerHTML;
+  assert.ok(html.includes('<pre class="log">') && html.includes('&lt;script&gt;bad'));
+  // Toggle off hides it; toggle on reuses the cached log — neither refetches.
+  const reqs = requests.length;
+  bodyClick({'data-run-id':'42'});
+  assert.ok(!element('drawer-body').innerHTML.includes('<pre class="log">'));
+  bodyClick({'data-run-id':'42'});
+  assert.ok(element('drawer-body').innerHTML.includes('&lt;script&gt;bad'));
+  assert.equal(requests.length,reqs);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+def test_drawer_files_tab_renders_diffs_notes_and_polls_slowly():
+    """Files tab: header, per-file collapsible diffs with +/- tints + muted hunks, escaped
+    patch lines, binary/truncated notes, the >20 collapse default, and the 30s poll — all
+    with expand state surviving re-renders."""
+    _run_drawer_js(
+        r"""
+(async()=>{
+  const row = element('pr-row'); row.dataset={repo:'o/n',pr:'7'};
+  openDrawer('o/n','7',row);
+  await reply(latest(),{number:7,title:'PR',state:'OPEN',author:{login:'kj'},
+    headRefName:'f',baseRefName:'main',body:'b',createdAt:'2026-01-01',updatedAt:'2026-01-02'});
+  selectDrawerTab('files',false);
+  assert.equal(DRAWER_TABS.files.path,'/api/plugins/github/detail/pr/diff');
+  assert.ok(requests[latest()].path.startsWith('/api/plugins/github/detail/pr/diff?repo=o%2Fn&number=7'));
+  assert.equal(lastIntervalMs,30000);   // Files polls no faster than 30s
+  const diff = {total_truncated:false, files:[
+    {path:'src/a.py',old_path:null,status:'modified',additions:2,deletions:1,
+      patch:'@@ -1,2 +1,3 @@\n ctx\n+<script>x</script>\n-gone',truncated:false,binary:false},
+    {path:'img.png',old_path:null,status:'added',additions:0,deletions:0,patch:null,truncated:false,binary:true},
+    {path:'new.txt',old_path:'old.txt',status:'renamed',additions:1,deletions:1,
+      patch:'@@ -1 +1 @@\n-a\n+b',truncated:false,binary:false},
+    {path:'big.txt',old_path:null,status:'modified',additions:9,deletions:0,patch:null,truncated:true,binary:false},
+  ]};
+  await reply(latest(),diff);
+  let html = element('drawer-body').innerHTML;
+  assert.ok(html.includes('4</b> files changed'));
+  assert.ok(html.includes('>M<') && html.includes('>A<') && html.includes('>R<'));  // status letters
+  assert.ok(html.includes('old.txt → new.txt'));             // rename
+  // <=20 files: expanded by default — tinted add/del lines, muted hunk, escaped patch.
+  assert.ok(html.includes('dl add') && html.includes('dl del') && html.includes('dl hunk'));
+  assert.ok(html.includes('&lt;script&gt;x') && !html.includes('<script>x'));
+  assert.ok(html.includes('Binary file'));                   // binary note
+  assert.ok(html.includes('Diff too large'));                // truncated note
+  assert.ok(html.includes('/pull/7/files'));                 // link to the PR files page
+  // Collapse src/a.py (index 0); the collapse survives a polling re-render.
+  bodyClick({'data-file':'0'});
+  assert.ok(!element('drawer-body').innerHTML.includes('&lt;script&gt;x'));
+  pollDrawer();
+  await reply(latest(),{...diff,total_truncated:true});
+  html = element('drawer-body').innerHTML;
+  assert.ok(!html.includes('&lt;script&gt;x'));              // still collapsed
+  assert.ok(html.includes('some diffs truncated'));          // header reflects total_truncated
+  // A fresh PR with >20 files collapses everything by default; expanding one survives a poll.
+  closeDrawer(); openDrawer('o/n','8',row);
+  await reply(latest(),{number:8,title:'PR',state:'OPEN',author:{login:'kj'},
+    headRefName:'f',baseRefName:'main',body:'b',createdAt:'2026-01-01',updatedAt:'2026-01-02'});
+  selectDrawerTab('files',false);
+  const many = {total_truncated:false, files: Array.from({length:21},(_,i)=>({
+    path:'f'+i+'.txt',old_path:null,status:'modified',additions:1,deletions:0,
+    patch:'@@ -1 +1 @@\n+x',truncated:false,binary:false}))};
+  await reply(latest(),many);
+  html = element('drawer-body').innerHTML;
+  assert.ok(html.includes('21</b> files changed'));
+  assert.ok(!html.includes('class="diff"'));                 // all collapsed
+  bodyClick({'data-file':'0'});
+  assert.ok(element('drawer-body').innerHTML.includes('class="diff"'));
+  pollDrawer();
+  await reply(latest(),{...many,total_truncated:true});
+  assert.ok(element('drawer-body').innerHTML.includes('class="diff"'));  // expansion survived the poll
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+def test_drawer_fetches_checks_and_diff_routes_and_is_read_only():
+    """r5 (static) — the drawer fetches the gated Checks + Files data routes and references
+    no write route or mutating fetch anywhere on the board page."""
+    from ghplugin.view import PAGE
+
+    assert 'const DET = "/api/plugins/github/detail/pr"' in PAGE  # the detail route base
+    assert 'checks: {label: "Checks", path: DET+"/checks"' in PAGE  # Checks tab data route
+    assert 'files: {label: "Files", path: DET+"/diff"' in PAGE  # Files tab data route
+    assert "POST" not in PAGE  # the board is strictly read-only — no writes
+    for forbidden in ('"PUT"', '"DELETE"', '"PATCH"', "method:"):
+        assert forbidden not in PAGE
+    assert '/api/plugins/github/issue"' not in PAGE  # filing still lives in the widget/palette
+
+
+def test_drawer_escapes_checks_and_files_strings_and_tints_diffs():
+    """r5 (static) — every GitHub-sourced string in the new tabs passes through esc(), diff
+    lines carry the +/- tint classes from --pl-* tokens, and the Files tab declares a 30s poll."""
+    from ghplugin.view import PAGE
+
+    for fragment in ("esc(c.name", "esc(st.log)", "esc(f.path)", "esc(line)", "esc(c.workflow)"):
+        assert fragment in PAGE
+    assert "chk-badge" in PAGE  # the fail-count badge markup
+    assert ".dl.add{background:var(--pl-color-success-muted" in PAGE
+    assert ".dl.del{background:var(--pl-color-danger-muted" in PAGE
+    assert ".dl.hunk{color:var(--pl-color-fg-muted)" in PAGE
+    assert 'files: {label: "Files"' in PAGE and "poll: 30000" in PAGE  # Files polls no faster than 30s
+    assert "setInterval(pollDrawer, (spec && spec.poll) || 15000)" in PAGE

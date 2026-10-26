@@ -137,6 +137,36 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .pr-body{white-space:pre-wrap;margin-top:16px}
   .pr-facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
   .pr-facts dd{margin:0}
+  /* Checks + Files tabs (bd-nm78.5) — dots reuse the list palette; diff tints from --pl-* with fallbacks. */
+  .d-sum{font-size:12px;color:var(--pl-color-fg-muted);margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
+  .d-sum b{color:var(--pl-color-fg);font-weight:600}
+  .chk-badge{margin-left:5px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;
+    background:var(--pl-color-danger-muted,#f8514926);color:var(--pl-color-danger,#f85149)}
+  .dot.pass{background:#3fb950}.dot.fail{background:#f85149}.dot.pending{background:#d29922}.dot.skipped{background:var(--pl-color-fg-muted)}
+  .chk{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--pl-color-border)}
+  .chk .dot{margin-top:0}
+  .chk-name{flex:1;overflow-wrap:anywhere}
+  .chk-dur{font-size:11px;color:var(--pl-color-fg-muted);white-space:nowrap}
+  .lnk{color:var(--pl-color-accent,#2f81f7);text-decoration:none;white-space:nowrap}
+  .lnk:hover{text-decoration:underline}
+  .logbtn{background:transparent;border:1px solid var(--pl-color-border);border-radius:var(--pl-radius,8px);
+    color:inherit;cursor:pointer;font-size:11px;padding:2px 8px;white-space:nowrap}
+  .log{margin:2px 0 10px;padding:8px;border-radius:var(--pl-radius,8px);background:var(--pl-color-bg);
+    font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-size:11px;white-space:pre;overflow-x:auto;max-height:320px}
+  .file{border-bottom:1px solid var(--pl-color-border)}
+  .file-head{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:0;color:inherit;
+    cursor:pointer;text-align:left;padding:8px 2px;font-size:12px;font-family:inherit}
+  .file-head:hover{background:var(--pl-color-bg)}
+  .fstat{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-weight:600;width:1.2em;flex:none;text-align:center}
+  .fstat.added{color:#3fb950}.fstat.deleted{color:#f85149}.fstat.renamed{color:#a371f7}.fstat.modified{color:#d29922}
+  .fpath{flex:1;overflow-wrap:anywhere}
+  .fnum{font-size:11px;white-space:nowrap}.fnum .add{color:#3fb950}.fnum .del{color:#f85149}
+  .diff{margin:0 0 8px;overflow-x:auto;background:var(--pl-color-bg);border-radius:var(--pl-radius,8px)}
+  .dl{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-size:11px;white-space:pre;padding:0 8px;min-width:max-content}
+  .dl.add{background:var(--pl-color-success-muted,#3fb95026)}
+  .dl.del{background:var(--pl-color-danger-muted,#f8514926)}
+  .dl.hunk{color:var(--pl-color-fg-muted)}
+  .note{padding:6px 8px 10px;color:var(--pl-color-fg-muted);font-size:12px}
 __SETUP_CSS__
 </style></head><body>
 <div id="wrap">
@@ -172,6 +202,20 @@ __SETUP_CSS__
   let tab = "issues";
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
   const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}); } catch(e){ return ""; } };
+  const fmtDur = (a,b) => { if(!a||!b) return ""; const ms = new Date(b)-new Date(a); if(!(ms>=0)) return ""; const s = Math.round(ms/1000); return s<60 ? s+"s" : Math.floor(s/60)+"m "+(s%60)+"s"; };
+  // Mirror read_tools.classify_check for the CheckRun shape (the server already folds a
+  // StatusContext into status/conclusion), so the dot/ordering match the tool summary.
+  const CHECK_FAIL = new Set(["FAILURE","ERROR","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE"]);
+  const CHECK_SKIP = new Set(["SKIPPED","NEUTRAL","STALE"]);
+  function checkCat(c){
+    const status = String(c.status||"").toUpperCase(), concl = String(c.conclusion||"").toUpperCase();
+    if(status && status !== "COMPLETED") return "pending";
+    if(concl === "SUCCESS") return "pass";
+    if(CHECK_FAIL.has(concl)) return "fail";
+    if(CHECK_SKIP.has(concl)) return "skipped";
+    return "pending";
+  }
+  const FILE_LETTER = {added:"A",modified:"M",deleted:"D",renamed:"R"};
   // Inline Lucide (v0.468) SVGs — themed via currentColor, no runtime dep / kit icon API.
   const svg = (paths) => '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+paths+'</svg>';
   const ICON = {
@@ -207,7 +251,13 @@ __SETUP_CSS__
 
   // Adapted from projectBoard-plugin view/board.js: shared shell, automatic tab
   // activation, identity + sequence fences, and unchanged snapshot suppression.
-  const DRAWER_TABS = {overview: {label: "Overview", path: "/api/plugins/github/detail/pr", render: prOverview}};
+  const DET = "/api/plugins/github/detail/pr";
+  const DRAWER_TABS = {
+    overview: {label: "Overview", path: DET, render: prOverview, poll: 15000},
+    checks: {label: "Checks", path: DET+"/checks", render: prChecks, poll: 15000},
+    // The diff rarely changes — poll it no faster than 30s (bd-nm78.5 acceptance).
+    files: {label: "Files", path: DET+"/diff", render: prFiles, poll: 30000},
+  };
   let drawerId = 0, drawerSeq = 0, drawer = null, drawerTimer = null, drawerLast = "";
   let drawerOpener = null;
   function prOverview(it){
@@ -218,20 +268,106 @@ __SETUP_CSS__
       + '<div class="pr-body">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '');
   }
+  function prFilesHref(){
+    // Built from the requested identity — never trust an API URL scheme (same as the header link).
+    return "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")
+      + "/pull/"+encodeURIComponent(drawer.number)+"/files";
+  }
+  function prChecks(data){
+    const checks = Array.isArray(data.checks) ? data.checks : [];
+    const sum = data.summary || {};
+    const summary = '<div class="d-sum"><span><b>'+esc(sum.pass||0)+'</b> passing</span>'
+      + '<span><b>'+esc(sum.fail||0)+'</b> failing</span>'
+      + '<span><b>'+esc(sum.pending||0)+'</b> pending</span>'
+      + '<span><b>'+esc(sum.skipped||0)+'</b> skipped</span></div>';
+    if(!checks.length) return summary + '<div class="empty">No checks for this pull request.</div>';
+    const logs = drawer.checkLogs || {};
+    // Failing first; otherwise keep the server's order (index tiebreaker for a stable sort).
+    const ordered = checks.map((c,i) => [c,i])
+      .sort((a,b) => (checkCat(a[0])==="fail"?0:1) - (checkCat(b[0])==="fail"?0:1) || a[1]-b[1]);
+    const rows = ordered.map(([c]) => {
+      const cat = checkCat(c);
+      const name = (c.workflow ? esc(c.workflow)+" / " : "") + esc(c.name||"?");
+      const dur = fmtDur(c.started_at, c.completed_at);
+      const failing = cat==="fail" && c.run_id != null;
+      const st = failing ? logs[c.run_id] : null;
+      let row = '<div class="chk"><span class="dot '+cat+'"></span><span class="chk-name">'+name+'</span>'
+        + (dur ? '<span class="chk-dur">'+esc(dur)+'</span>' : '')
+        + (c.url ? '<a class="lnk" href="'+esc(c.url)+'" target="_blank" rel="noreferrer">details ↗</a>' : '')
+        + (failing ? '<button type="button" class="logbtn" data-run-id="'+esc(c.run_id)+'" aria-expanded="'
+            + (st&&st.open?"true":"false")+'">'+(st&&st.open?"Hide failure log":"Show failure log")+'</button>' : '')
+        + '</div>';
+      if(st && st.open){
+        if(st.log != null) row += '<pre class="log">'+esc(st.log)+'</pre>';
+        else if(st.error) row += '<div class="note">'+esc(st.error)+'</div>';
+        else row += '<div class="hint">Loading…</div>';
+      }
+      return row;
+    }).join("");
+    return summary + rows;
+  }
+  function renderPatch(patch){
+    const lines = String(patch).split("\n");
+    if(lines.length && lines[lines.length-1]==="") lines.pop();  // drop the trailing split artifact
+    return lines.map(line => {
+      const cls = line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "";
+      return '<div class="dl'+(cls?" "+cls:"")+'">'+esc(line)+'</div>';
+    }).join("");
+  }
+  function prFiles(data){
+    const files = Array.isArray(data.files) ? data.files : [];
+    // Collapse everything by default once there are more than 20 files; otherwise open them.
+    // Initialised ONCE per drawer so the person's expand/collapse survives polling re-renders.
+    if(!drawer.filesInit){
+      drawer.filesInit = true; drawer.filesOpen = new Set();
+      if(files.length <= 20) files.forEach(f => drawer.filesOpen.add(f.path));
+    }
+    const open = drawer.filesOpen;
+    let add = 0, del = 0;
+    for(const f of files){ add += Number(f.additions)||0; del += Number(f.deletions)||0; }
+    const href = prFilesHref();
+    const head = '<div class="d-sum"><span><b>'+esc(files.length)+'</b> file'+(files.length===1?"":"s")+' changed</span>'
+      + '<span class="fnum"><span class="add">+'+esc(add)+'</span> <span class="del">−'+esc(del)+'</span></span>'
+      + (data.total_truncated ? '<span><a class="lnk" href="'+esc(href)+'" target="_blank" rel="noreferrer">'
+          + 'some diffs truncated — view on GitHub ↗</a></span>' : '')+'</div>';
+    if(!files.length) return head + '<div class="empty">No file changes.</div>';
+    const rows = files.map((f,i) => {
+      const o = open.has(f.path);
+      const path = f.status==="renamed" && f.old_path ? esc(f.old_path)+" → "+esc(f.path) : esc(f.path);
+      let row = '<div class="file"><button type="button" class="file-head" data-file="'+i+'" aria-expanded="'+(o?"true":"false")+'">'
+        + '<span class="fstat '+esc(f.status||"")+'">'+esc(FILE_LETTER[f.status]||"?")+'</span>'
+        + '<span class="fpath">'+path+'</span>'
+        + '<span class="fnum"><span class="add">+'+esc(f.additions||0)+'</span> <span class="del">−'+esc(f.deletions||0)+'</span></span>'
+        + '</button>';
+      if(o){
+        if(f.binary || f.truncated || f.patch == null){
+          const why = f.binary ? "Binary file" : "Diff too large to show here";
+          row += '<div class="note">'+esc(why)+' — <a class="lnk" href="'+esc(href)+'" target="_blank" rel="noreferrer">view on GitHub ↗</a></div>';
+        } else {
+          row += '<div class="diff">'+renderPatch(f.patch)+'</div>';
+        }
+      }
+      return row + '</div>';
+    }).join("");
+    return head + rows;
+  }
   function renderDrawerTabs(){
-    $("drawer-tabs").innerHTML = Object.entries(DRAWER_TABS).map(([t, spec]) =>
-      '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="tab"'
-      + ' aria-selected="'+(t===drawer.tab)+'" aria-controls="drawer-body" tabindex="'+(t===drawer.tab?0:-1)+'"'
-      + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+'</button>').join("");
+    $("drawer-tabs").innerHTML = Object.entries(DRAWER_TABS).map(([t, spec]) => {
+      const badge = (t==="checks" && drawer.checksFail) ? '<span class="chk-badge">'+esc(drawer.checksFail)+'</span>' : '';
+      return '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="tab"'
+        + ' aria-selected="'+(t===drawer.tab)+'" aria-controls="drawer-body" tabindex="'+(t===drawer.tab?0:-1)+'"'
+        + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+badge+'</button>';
+    }).join("");
     $("drawer-body").setAttribute("aria-labelledby", "dtab-"+drawer.tab);
   }
   function selectDrawerTab(t, focus){
     if(!drawer || !Object.hasOwn(DRAWER_TABS, t)) return;
     if(t !== drawer.tab){
-      drawer.tab = t; ++drawerSeq; drawerLast = "";
+      drawer.tab = t; ++drawerSeq; drawerLast = ""; drawer.lastData = undefined;
       renderDrawerTabs();
       $("drawer-body").innerHTML = '<div class="hint">Loading…</div>';
-      pollDrawer();
+      $("drawer-body").scrollTop = 0;
+      startDrawerPolling();  // restart at the new tab's interval (Files polls slower, 30s)
     }
     if(focus) $("dtab-"+t).focus();
   }
@@ -248,16 +384,63 @@ __SETUP_CSS__
     const sig = JSON.stringify(data);
     if(sig === drawerLast) return;
     drawerLast = sig;
-    if(data.error){ $("drawer-body").innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
+    // Only the Overview response carries the PR's identity (title/state); the Checks and
+    // Files responses have their own shapes, so they leave the header untouched.
+    if(active === "overview" && !data.error) updatePrHeader(data);
+    // The Checks tab label carries a fail-count badge; refresh it when the count changes.
+    if(active === "checks" && !data.error){
+      const fail = (data.summary && data.summary.fail) || 0;
+      if(fail !== drawer.checksFail){ drawer.checksFail = fail; renderDrawerTabs(); }
+    }
+    drawer.lastData = data;
+    renderDrawerBody();
+  }
+  function updatePrHeader(data){
     const state = String(data.state||"").toLowerCase();
     const pill = state==="merged" ? "merged" : state==="closed" ? "closed" : data.isDraft ? "draft" : "open";
     $("drawer-title").innerHTML = '#'+esc(data.number)+' '+esc(data.title);
     // Construct the link from the requested identity; never trust an API URL scheme.
     const href = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/pull/"+encodeURIComponent(drawer.number);
     $("drawer-meta").innerHTML = '<span class="pill">'+esc(pill)+'</span> <a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
-    const body = $("drawer-body"), top = body.scrollTop;
+  }
+  // Re-render the active tab's body from the last snapshot — called by the poller AND by the
+  // in-body toggles (log / file expand), so a toggle survives the next unchanged-snapshot poll.
+  function renderDrawerBody(){
+    if(!drawer) return;
+    const spec = DRAWER_TABS[drawer.tab], data = drawer.lastData, body = $("drawer-body"), top = body.scrollTop;
+    if(data === undefined){ body.innerHTML = '<div class="hint">Loading…</div>'; return; }
+    if(data.error){ body.innerHTML = '<div class="empty">'+esc(data.error)+'</div>'; return; }
     body.innerHTML = spec.render(data);
     body.scrollTop = top;
+  }
+  async function loadCheckLog(runId){
+    const id = drawer.id, st = drawer.checkLogs[runId];
+    st.loading = true;
+    let data;
+    try {
+      const path = DRAWER_TABS.checks.path+"?repo="+encodeURIComponent(drawer.repo)
+        + "&number="+encodeURIComponent(drawer.number)+"&run_id="+encodeURIComponent(runId);
+      const r = await kit.apiFetch(path);
+      data = r.ok ? await r.json() : {error: "Could not load the failure log."};
+    } catch(e){ data = {error: "Failed to load the log — is the agent reachable?"}; }
+    if(!drawer || drawer.id !== id) return;  // drawer closed / reopened — drop the late log
+    st.loading = false;
+    if(data.error) st.error = data.error; else st.log = data.log_tail || "";
+    if(drawer.tab === "checks") renderDrawerBody();
+  }
+  function toggleCheckLog(runId){
+    if(!drawer) return;
+    const logs = drawer.checkLogs || (drawer.checkLogs = {});
+    const st = logs[runId] || (logs[runId] = {open:false, log:null, error:null, loading:false});
+    st.open = !st.open;
+    if(st.open && st.log === null && !st.loading && !st.error) loadCheckLog(runId);
+    renderDrawerBody();
+  }
+  function toggleFile(i){
+    if(!drawer || !drawer.lastData || !Array.isArray(drawer.lastData.files)) return;
+    const f = drawer.lastData.files[i]; if(!f) return;
+    if(drawer.filesOpen.has(f.path)) drawer.filesOpen.delete(f.path); else drawer.filesOpen.add(f.path);
+    renderDrawerBody();
   }
   function stopDrawerPolling(){
     if(drawerTimer !== null){ clearInterval(drawerTimer); drawerTimer = null; }
@@ -266,10 +449,13 @@ __SETUP_CSS__
     stopDrawerPolling();
     if(!drawer || document.hidden) return;
     pollDrawer();
-    drawerTimer = setInterval(pollDrawer, 15000);
+    const spec = DRAWER_TABS[drawer.tab];
+    drawerTimer = setInterval(pollDrawer, (spec && spec.poll) || 15000);
   }
   function openDrawer(repo, number, opener){
-    drawer = {id: ++drawerId, repo, number, tab: "overview"};
+    // checkLogs / filesOpen / checksFail hold the Checks-log + Files-expand state so a
+    // polling re-render keeps them; they're per-drawer, reset on each open.
+    drawer = {id: ++drawerId, repo, number, tab: "overview", lastData: undefined, checkLogs: {}, checksFail: 0, filesInit: false, filesOpen: new Set()};
     drawerLast = ""; drawerOpener = opener;
     $("drawer-title").innerHTML = '#'+esc(number)+' Pull request';
     $("drawer-meta").innerHTML = "";
@@ -313,6 +499,14 @@ __SETUP_CSS__
   $("drawer-tabs").addEventListener("click", (e) => {
     const t = e.target.closest("[data-drawer-tab]");
     if(t) selectDrawerTab(t.getAttribute("data-drawer-tab"), false);
+  });
+  // Delegated so toggles survive the body's full re-render on each poll (the "details ↗" /
+  // "view on GitHub ↗" links carry neither attribute, so they navigate instead of toggling).
+  $("drawer-body").addEventListener("click", (e) => {
+    const logBtn = e.target.closest("[data-run-id]");
+    if(logBtn){ toggleCheckLog(logBtn.getAttribute("data-run-id")); return; }
+    const fileBtn = e.target.closest("[data-file]");
+    if(fileBtn){ toggleFile(Number(fileBtn.getAttribute("data-file"))); }
   });
   $("drawer-tabs").addEventListener("keydown", (e) => {
     const tabs = [...$("drawer-tabs").querySelectorAll("[data-drawer-tab]")].map(b => b.getAttribute("data-drawer-tab"));
