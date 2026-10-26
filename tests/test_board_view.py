@@ -560,7 +560,7 @@ def _run_drawer_js(checks):
 
 def test_drawer_interactions_and_async_lifecycle():
     """Open/close, escaping, snapshot suppression, races, visibility, and arrow-key tab nav
-    across the three real tabs — Files polls slower (30s), Overview/Checks at 15s."""
+    across all four tabs — Files polls slower (30s), the other tabs at 15s."""
     _run_drawer_js(
         r"""
 (async()=>{
@@ -607,10 +607,10 @@ def test_drawer_interactions_and_async_lifecycle():
   document.hidden=false; events.visibilitychange(); assert.equal(timers.size,1);
   await reply(7,{error:hostile}); assert.ok(element('drawer-body').innerHTML.includes('&lt;img'));
   pollDrawer(); await reply(8,data); assert.ok(element('drawer-body').innerHTML.includes('Author'));
-  // Overview + the two real tabs are keyboard-reachable; Files restarts the poller at 30s.
-  assert.deepEqual(Object.keys(DRAWER_TABS),['overview','checks','files']);
+  // All four tabs are keyboard-reachable; Files restarts the poller at 30s.
+  assert.deepEqual(Object.keys(DRAWER_TABS),['overview','checks','files','conversation']);
   for(const [key,want,ms] of [['ArrowRight','checks',15000],['Home','overview',15000],
-      ['End','files',30000],['ArrowRight','overview',15000],['ArrowLeft','files',30000]]){
+      ['End','conversation',15000],['ArrowRight','overview',15000],['ArrowLeft','conversation',15000],['ArrowLeft','files',30000]]){
     let prevented=false;
     element('drawer-tabs').handlers.keydown({key,preventDefault(){prevented=true;}});
     assert.equal(drawer.tab,want); assert.equal(prevented,true);
@@ -786,3 +786,95 @@ def test_drawer_escapes_checks_and_files_strings_and_tints_diffs():
     assert ".dl.hunk{color:var(--pl-color-fg-muted)" in PAGE
     assert 'files: {label: "Files"' in PAGE and "poll: 30000" in PAGE  # Files polls no faster than 30s
     assert "setInterval(pollDrawer, (spec && spec.poll) || 15000)" in PAGE
+
+
+def test_conversation_plain_text_and_read_only_contract():
+    from ghplugin.view import PAGE
+
+    assert 'conversation: {label: "Conversation", path: DET+"/conversation"' in PAGE
+    for escaped in ('esc(c.body||"")', "esc(author)", "esc(t.path)", "esc(comments[0].diffHunk)"):
+        assert escaped in PAGE
+    assert ".pr-body{white-space:pre-wrap" in PAGE
+    for forbidden in (
+        "marked",
+        "markdown-it",
+        "renderMarkdown",
+        "innerHTML = c.body",
+        "POST",
+        "/reply",
+        "/resolve",
+        "/comment",
+        "method:",
+    ):
+        assert forbidden not in PAGE
+
+
+def test_conversation_timeline_threads_summary_and_polling():
+    _run_drawer_js(
+        r"""
+(async()=>{
+  const hostile = '<img src=x onerror=alert(1)>';
+  openDrawer('o/n',7,element('row'));
+  await reply(latest(),{latestReviews:[{author:{login:'alice'},state:'APPROVED'},
+    {author:{login:'bob'},state:'CHANGES_REQUESTED'}],reviewRequests:[{login:'carol'},{name:hostile}]});
+  assert.ok(element('drawer-body').innerHTML.includes('alice ✓ approved · bob ✗ changes requested · carol requested'));
+  assert.ok(element('drawer-body').innerHTML.includes('&lt;img'));
+  selectDrawerTab('conversation',false);
+  assert.equal(requests[latest()].path,'/api/plugins/github/detail/pr/conversation?repo=o%2Fn&number=7');
+  assert.equal(timers.size,1);
+  assert.equal(lastIntervalMs,15000);
+  const c = (body,date='2026-01-01') => ({body,author:{login:hostile},createdAt:date,url:'https://github.com/o/n/pull/7#comment'});
+  const data = {comments:[c('late','2026-01-04'),c('early')],reviews:[
+    {author:{login:'reviewer'},state:'APPROVED',body:'',submittedAt:'2026-01-02'},
+    {state:'CHANGES_REQUESTED',body:hostile,submittedAt:'2026-01-03'},
+    {state:'COMMENTED',body:'review-body',submittedAt:'2026-01-05'},
+    {author:{login:'omit-me'},state:'COMMENTED',body:'',submittedAt:'2026-01-06'}],
+    threads:[{id:'resolved',isResolved:true,isOutdated:true,path:'done.py',line:9,
+      comments:[{...c('resolved-first'),diffHunk:hostile},c('resolved-second')]},
+      {id:'open',isResolved:false,path:hostile,line:3,comments:[{...c(hostile),diffHunk:hostile},c('thread-last')]}],
+    counts:{unresolved:1}};
+  await reply(latest(),data);
+  let html = element('drawer-body').innerHTML;
+  for(const [a,b] of [['early','approved'],['approved','changes requested'],['changes requested','late'],['late','review-body'],['review-body','Review threads'],['data-thread="open"','data-thread="resolved"']]){
+    assert.ok(html.indexOf(a)<html.indexOf(b),a+' before '+b);
+  }
+  assert.ok(html.includes('>commented</span>'));
+  assert.ok(!html.includes('omit-me'));
+  assert.ok(!html.includes('<img'));
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;:3'));
+  assert.ok(html.includes('<pre class="thread-hunk">&lt;img'));
+  assert.ok(html.includes('thread-last'));
+  assert.ok(html.includes('data-thread="resolved" aria-expanded="false"'));
+  assert.ok(html.includes('>resolved</span>') && html.includes('>outdated</span>'));
+  assert.ok(!html.includes('resolved-second'));
+  assert.ok(html.includes('href="https://github.com/o/n/pull/7#comment"'));
+  assert.ok(html.includes('d ago'));
+  assert.ok(element('drawer-tabs').innerHTML.includes('Conversation<span class="chk-badge">1</span>'));
+  bodyClick({'data-thread':'resolved'});
+  bodyClick({'data-thread':'open'});
+  assert.ok(element('drawer-body').innerHTML.includes('resolved-first'));
+  assert.ok(element('drawer-body').innerHTML.includes('resolved-second'));
+  element('drawer-body').scrollTop=80;
+  pollDrawer();
+  await reply(latest(),{...data,threads:[...data.threads].reverse(),counts:{unresolved:0}});
+  html=element('drawer-body').innerHTML;
+  assert.ok(html.includes('resolved-second'));
+  assert.ok(!html.includes('thread-last'));
+  assert.equal(element('drawer-body').scrollTop,80);
+  assert.ok(!element('drawer-tabs').innerHTML.includes('chk-badge'));
+  assert.ok(!conversationItem({...c('x'),url:'javascript:alert(1)'}).includes('javascript:'));
+  pollDrawer(); const stale=latest();
+  selectDrawerTab('overview',false);
+  await reply(stale,data);
+  assert.ok(!element('drawer-body').innerHTML.includes('Review threads'));
+  selectDrawerTab('conversation',false); await reply(latest(),data);
+  assert.ok(element('drawer-body').innerHTML.includes('resolved-second'));
+  closeDrawer(); openDrawer('o/n',8,element('row'));
+  selectDrawerTab('conversation',false); await reply(latest(),data);
+  assert.ok(!element('drawer-body').innerHTML.includes('resolved-second'));
+  pollDrawer(); await reply(latest(),{});
+  assert.ok(element('drawer-body').innerHTML.includes('No review threads.'));
+  closeDrawer();
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
