@@ -231,6 +231,18 @@ def build_data_router(cfg, registry=None):
 
         return await fetch_pr_diff(repo, _detail_number(number), fresh=bool(fresh))
 
+    @router.get("/detail/pr/conversation")
+    async def _detail_conversation(repo: str, number: str, fresh: int = 0) -> dict:
+        from .detail import fetch_pr_conversation
+
+        return await fetch_pr_conversation(repo, _detail_number(number), fresh=bool(fresh))
+
+    @router.get("/detail/issue")
+    async def _detail_issue(repo: str, number: str, fresh: int = 0) -> dict:
+        from .detail import fetch_issue_detail
+
+        return await fetch_issue_detail(repo, _detail_number(number), fresh=bool(fresh))
+
     @router.post("/issue")
     async def _create_issue(body: dict = Body(...)) -> dict:
         resolved = await _resolved()
