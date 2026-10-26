@@ -236,6 +236,20 @@ __SETUP_CSS__
   const MARKED_CDN = "https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js";
   const MARKED_SRI = "sha512-xeUh+KxNyTufZOje++oQHstlMQ8/rpyzPuM+gjMFYK3z5ILJGE7l2NvYL+XfliKURMpBIKKp1XoPN/qswlSMFA==";
   let MARKED = null, MARKED_LOAD = null;
+  // A marked renderer hook neutralises raw HTML: every block OR inline HTML token
+  // (``<script>``, ``<img onerror>``, ``<details ontoggle>``, ``<svg onload>`` …) is escaped to
+  // text instead of passed through as live markup, so no such element is ever created. Doing it
+  // at the token seam — not by pre-escaping the source — keeps blockquotes (``> q``), ``<url>``
+  // autolinks and fenced code (which marked escapes itself) working. Registered once per load.
+  function configureMarked(m){
+    if(!m || m.__ghMd) return m;
+    m.__ghMd = true;
+    try {
+      if(typeof m.use === "function")
+        m.use({renderer: {html: (h) => esc(typeof h === "string" ? h : (h && (h.text != null ? h.text : h.raw)) || "")}});
+    } catch(e){ /* keep marked usable even if the hook cannot register */ }
+    return m;
+  }
   function loadMarked(){
     if(MARKED_LOAD) return MARKED_LOAD;
     MARKED_LOAD = new Promise((resolve) => {
@@ -248,13 +262,14 @@ __SETUP_CSS__
       s.onload = () => resolve(window.marked || null);
       s.onerror = () => resolve(null);
       (document.head || document.documentElement).appendChild(s);
-    }).then((m) => (MARKED = m || null));
+    }).then((m) => (MARKED = m ? configureMarked(m) : null));
     return MARKED_LOAD;
   }
   function renderMarkdown(marked, src){
-    const safe = String(src).replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const parse = (marked && marked.parse) ? marked.parse : marked;
-    return parse(safe, {breaks: true, gfm: true});
+    // The source is handed to marked verbatim — the html hook (configureMarked) is what keeps
+    // raw markup inert, so markdown constructs that use < / > are not mangled before parsing.
+    const parse = (marked && marked.parse) ? marked.parse.bind(marked) : marked;
+    return parse(String(src == null ? "" : src), {gfm: true, breaks: true});
   }
   function sanitizeMarkdown(el){
     el.querySelectorAll("a[href],img[src]").forEach((n) => {

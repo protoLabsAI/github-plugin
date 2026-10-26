@@ -1342,16 +1342,33 @@ const rootFor = nodes => ({querySelectorAll(sel){assert.equal(sel,'.md');return 
 """
 
 
-def test_markdown_source_escape_and_sanitization():
+def test_markdown_source_verbatim_and_html_hook_and_sanitization():
     _run_drawer_js(
         _MARKDOWN_DOM
         + r"""
-const hostile='<img src=x onerror=alert(1)><script>alert(1)</script>';
-const literal=renderMarkdown({parse(src,opts){
-  assert.equal(src,esc(hostile)); assert.deepEqual(opts,{gfm:true,breaks:true}); return '<p>'+src+'</p>';
-}},hostile);
-assert.deepEqual(fragment(literal).nodes.map(n=>n.tagName),['P']);
-assert.equal(decode(literal.slice(3,-4)),hostile);
+// renderMarkdown hands marked the SOURCE untouched — pre-escaping < / > would break
+// blockquotes (`> q`), <url> autolinks and double-escape code like `List<T>`.
+let seen;
+const src='> q\n<https://example.com>\n`List<T>` x => y';
+const parsed=renderMarkdown({parse(s,opts){seen={s,opts}; return '<blockquote><p>q</p></blockquote>';}},src);
+assert.equal(seen.s,src); assert.deepEqual(seen.opts,{gfm:true,breaks:true});
+assert.equal(parsed,'<blockquote><p>q</p></blockquote>');
+
+// configureMarked registers (once) a renderer whose html() hook escapes raw HTML to text, so a
+// hostile <img onerror>/<script>/<details ontoggle>/<svg onload> never becomes an element.
+let htmlHook; const marked={use(ext){htmlHook=ext.renderer.html;}};
+assert.equal(configureMarked(marked),marked);
+configureMarked(marked); assert.equal(typeof htmlHook,'function');  // idempotent — registers once
+for(const raw of ['<img src=x onerror=alert(1)>','<script>alert(1)</script>',
+                  '<details open ontoggle=alert(1)>x</details>','<svg/onload=alert(1)>']){
+  const out=htmlHook(raw);
+  assert.equal(decode(out),raw);                                // shown verbatim as text
+  assert.deepEqual(fragment(out).nodes.map(n=>n.tagName),[]);   // no element created
+}
+assert.equal(htmlHook({text:'<iframe src=javascript:alert(1)>'}),esc('<iframe src=javascript:alert(1)>'));
+assert.equal(htmlHook(''),'');  // empty token stays empty
+
+// sanitizeMarkdown still scrubs the elements marked legitimately emits from markdown syntax.
 const f=fragment('<a href="javascript:alert(1)">x</a><a href=" DATA:text/html,x">x</a>'
   +'<a href="VbScript:x">x</a><a href="java&#x09;script:x">x</a>'
   +'<a href="https://example.com">safe</a><a href="mailto:a@example.com">mail</a>'
