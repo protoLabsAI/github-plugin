@@ -290,19 +290,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_get_pr(number: int, repo: str = "", body_max_chars: int = 0) -> str:
-        """Fetch a GitHub pull request — the merge-readiness picture in one call: title,
-        state, draft?, author, branch + head commit sha (and the merge commit once merged),
-        review decision, mergeability + merge state, a
-        checks summary (N pass / N fail / N pending + the failing check names), the
-        reviews (author, verdict, excerpt), changed files, and the body.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            body_max_chars: Body characters to fetch, capped at 60000. 0 (or negative)
-                uses the remaining 12000-character response budget. Do not round-trip-edit
-                a truncated body; fetch it in full with a larger limit first.
-        """
+        """Fetch one PR's merge-readiness picture: title, state, draft, author, branch, head sha (merge commit once merged), review decision, mergeability + merge state, checks summary (pass/fail/pending + failing names), reviews, changed files, body. body_max_chars: up to 60000; 0 = fit the 12000-char response budget. Never round-trip-edit a truncated body; refetch it in full first."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -360,15 +348,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_get_issue(number: int, repo: str = "", body_max_chars: int = 0) -> str:
-        """Fetch a GitHub issue: title, state, author, labels, and body.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue number.
-            body_max_chars: Body characters to fetch, capped at 60000. 0 (or negative)
-                uses the remaining 12000-character response budget. Do not round-trip-edit
-                a truncated body; fetch it in full with a larger limit first.
-        """
+        """Fetch an issue: title, state, author, labels, body. body_max_chars: up to 60000; 0 = fit the 12000-char response budget. Never round-trip-edit a truncated body; refetch it in full first."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -390,13 +370,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_list_issues(repo: str = "", state: str = "open", limit: int = 20) -> str:
-        """List GitHub issues for a repo.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            state: ``open`` | ``closed`` | ``all`` (default ``open``).
-            limit: Max issues to return (1-50, default 20).
-        """
+        """List a repo's issues. state: open | closed | all; limit 1-50."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -435,13 +409,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_get_commit_diff(ref: str, repo: str = "", max_chars: int = 8000) -> str:
-        """Fetch a commit's metadata + unified diff.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            ref: Commit SHA (or ref) to inspect.
-            max_chars: Truncate the diff at this many characters (default 8000).
-        """
+        """Fetch a commit's metadata + unified diff (ref: SHA or ref; diff cut at max_chars)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -459,13 +427,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_pr_diff(number: int, repo: str = "", max_chars: int = 12000) -> str:
-        """Fetch a pull request's full unified diff — for reviewing the change itself.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            max_chars: Truncate the diff at this many characters (default 12000).
-        """
+        """Fetch a PR's full unified diff, for reviewing the change itself (cut at max_chars)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -481,15 +443,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_ci_runs(repo: str = "", branch: str = "", limit: int = 15) -> str:
-        """List recent GitHub Actions runs for a repo — for CI triage.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            branch: Optional branch filter (e.g. ``main``).
-            limit: Max runs to return (capped at 50).
-
-        Feed a failing run's id to ``github_run_failure`` to see why it failed.
-        """
+        """List recent GitHub Actions runs (optional branch filter; limit up to 50) for CI triage. Pass a failing run's id to github_run_failure."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -523,13 +477,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_run_failure(run_id: int, repo: str = "", max_lines: int = 40) -> str:
-        """Explain why a GitHub Actions run failed — the error lines from its failed steps.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            run_id: The run id (``databaseId`` from ``github_ci_runs``).
-            max_lines: Cap on error lines returned (capped at 80).
-        """
+        """Explain why an Actions run failed: the error lines from its failed steps. run_id = databaseId from github_ci_runs; max_lines up to 80."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -557,23 +505,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
     # registering an fs project per repo. ───────────────────────────────────────────
     @tool
     async def github_read_file(path: str, repo: str = "", ref: str = "", start_line: int = 1, end_line: int = 0) -> str:
-        """Read a file's raw contents from a GitHub repo — the whole file or a line range.
-
-        Output is capped at 20000 chars per call. A longer read is cut at a LINE boundary
-        (never mid-line; the file is NOT broken there) and ends with a marker such as
-        ``… [truncated: showed lines 1-540 of 870 (20000-char cap); continue with start_line=541]``.
-        A ranged read ends with ``… [showed lines A-B of N; …]``. Page a large file with
-        ``start_line``/``end_line`` — don't guess at the rest or read another version instead.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            path: Path to the file within the repo (e.g. ``docs/guide.md``). For a directory
-                use ``github_repo_contents``; for a file as it is IN a PR use ``github_read_pr_file``.
-            ref: Optional branch / tag / SHA (default: the repo's default branch).
-            start_line: First line to return, 1-based (default 1).
-            end_line: Last line to return, inclusive; 0 (default) = to the end of the file
-                (still subject to the 20000-char cap).
-        """
+        """Read a file from a repo at ref (empty = default branch), whole or start_line..end_line (1-based, inclusive; end_line 0 = to the end). Output capped at 20000 chars per call: a longer read is cut at a LINE boundary (the file isn't broken there) and ends with a footer like `… [truncated: showed lines 1-540 of 870 (20000-char cap); continue with start_line=541]`. Page on with start_line; don't guess the rest or read another version. Directory: github_repo_contents; a file as it is in a PR: github_read_pr_file."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -604,27 +536,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
     async def github_read_pr_file(
         number: int, path: str, repo: str = "", start_line: int = 1, end_line: int = 0
     ) -> str:
-        """Read a file as it exists IN a pull request — at the PR's head commit.
-
-        Use this for every code-context read while reviewing a PR. Unlike
-        ``github_read_file``, there is no ref to get wrong: the head SHA is resolved
-        server-side from the PR number, so the file you get is the PR's version,
-        including anything the PR adds.
-
-        Output is capped at 20000 chars per call. A longer read is cut at a LINE boundary
-        (never mid-line; the file is NOT broken there) and ends with a marker such as
-        ``… [truncated: showed lines 1-540 of 870 (20000-char cap); continue with start_line=541]``.
-        A ranged read ends with ``… [showed lines A-B of N; …]``. Page a large file with
-        ``start_line``/``end_line`` — don't guess at the rest or read the base version instead.
-
-        Args:
-            number: PR number.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            path: Path to the file within the repo (e.g. ``src/lib/queries.ts``).
-            start_line: First line to return, 1-based (default 1).
-            end_line: Last line to return, inclusive; 0 (default) = to the end of the file
-                (still subject to the 20000-char cap).
-        """
+        """Read a file as it is IN a pull request, at the PR's head (resolved from the number, so no ref to get wrong; includes files the PR adds). Use for every code-context read while reviewing a PR. start_line/end_line: 1-based, inclusive; end_line 0 = to the end. Output capped at 20000 chars per call, cut at a LINE boundary with a footer ending `continue with start_line=N`; page on, don't guess the rest or read the base version."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -665,21 +577,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_path_exists(path: str, repo: str = "", ref: str = "") -> str:
-        """Check whether a path exists in a GitHub repo — the grounding probe for
-        review claims about external references.
-
-        A diff is often only correct if something OUTSIDE it exists (a cross-repo
-        `COPY --from` path, a workspace package, an action ref). The answer is
-        authoritative: EXISTS means the assumption holds (don't invent a problem
-        around it); MISSING means the dependency is really absent (that's the
-        finding). A tool error means UNVERIFIED — report a Gap, never a severity.
-
-        Args:
-            repo: Repository as ``owner/name`` — may be a DIFFERENT repo than the
-                PR under review (that is the point). Omit for the default repo.
-            path: Repo-relative path to check (file or directory).
-            ref: Optional branch / tag / SHA (default: the repo's default branch).
-        """
+        """Check whether a path (file or dir) exists in a repo at ref (empty = default branch); the repo may differ from the PR under review. Grounds review claims about things outside a diff (cross-repo COPY --from path, workspace package, action ref). EXISTS = the assumption holds, don't invent a problem; MISSING = really absent, that's the finding; a tool error = UNVERIFIED, report a Gap, never a severity."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -709,13 +607,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_repo_contents(repo: str = "", path: str = "", ref: str = "") -> str:
-        """List the contents (files + dirs) of a path in a GitHub repo.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            path: Directory path within the repo (default: repo root).
-            ref: Optional branch / tag / SHA (default: the repo's default branch).
-        """
+        """List the files + dirs at a path in a repo (default: root) at ref (empty = default branch)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -749,14 +641,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_list_prs(repo: str = "", state: str = "open", limit: int = 30) -> str:
-        """List pull requests — the PR board: number, title, author, state, draft?, branch,
-        review decision and merge state per row. Use ``github_get_pr`` for one PR's full picture.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            state: ``open`` (default) | ``closed`` | ``merged`` | ``all``.
-            limit: Max PRs to return (1-100, default 30).
-        """
+        """List PRs, one row each: number, title, author, state, draft, branch, review decision, merge state. state: open | closed | merged | all; limit 1-100. One PR in full: github_get_pr."""
         from .api import fetch_prs
 
         repo = resolve_repo(repo, default_repo) or ""
@@ -790,15 +675,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_issue_comments(number: int, repo: str = "", limit: int = 30) -> str:
-        """Read the comment thread on an issue or pull request (a PR is an issue for
-        comments): author, date and body per comment, newest ``limit`` in chronological
-        order. Use it to catch up on a discussion before replying or deciding.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue or PR number.
-            limit: Max comments to return (1-100, default 30 — the most recent ones).
-        """
+        """Read the comment thread on an issue or PR: author, date, body; the newest `limit` (1-100) in chronological order. Catch up here before replying or deciding."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -830,17 +707,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_review_threads(number: int, repo: str = "", include_resolved: bool = False) -> str:
-        """List a pull request's review THREADS (the inline, resolvable conversations —
-        CodeRabbit's and reviewers' line comments), with the thread id you pass to
-        ``github_reply_thread`` / ``github_resolve_thread``. Unresolved review threads keep a
-        PR's QA check from clearing, so after a fix round, read them here, then answer and
-        resolve each one.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Pull request number.
-            include_resolved: Also list already-resolved threads (default: unresolved only).
-        """
+        """List a PR's inline review THREADS (resolvable line comments, e.g. CodeRabbit's) with the thread ids github_reply_thread / github_resolve_thread take; unresolved only unless include_resolved. Unresolved threads keep the PR's QA check from clearing, so after a fix round read, answer and resolve each."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -895,16 +762,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_search_issues(query: str, repo: str = "", state: str = "open", limit: int = 20) -> str:
-        """Search a repo's issues by text — DEDUPE BEFORE FILING: call this with the
-        gist of a problem before ``github_create_issue`` and reference or reopen a
-        match instead of filing a duplicate. Returns number, state, title and URL per hit.
-
-        Args:
-            query: Free-text search (GitHub issue search syntax; e.g. ``"default_repo" label:bug``).
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            state: ``open`` (default) | ``closed`` | ``all``.
-            limit: Max results (1-100, default 20).
-        """
+        """Search a repo's issues (GitHub search syntax, e.g. `"default_repo" label:bug`); returns number, state, title, URL. DEDUPE BEFORE FILING: search the gist before github_create_issue and reference or reopen a match instead. state: open | closed | all; limit 1-100."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -939,12 +797,7 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
 
     @tool
     async def github_status() -> str:
-        """Check whether the GitHub CLI is installed and authenticated, and which repo the
-        other github_* tools default to. Call this FIRST when any github_* tool returns an
-        authentication / not-found / CLI error, or before GitHub work on a fresh machine —
-        it says exactly what's wrong and what the operator must do (install `gh`, run
-        `gh auth login`, or paste a token in Settings ▸ GitHub). Takes no arguments.
-        """
+        """Check that gh is installed + authenticated (as whom) and which repo the github_* tools default to; their `repo` arg is owner/name, omit it for that default. Call FIRST when a github_* tool returns an auth / not-found / CLI error, or on a fresh machine: it says what the operator must fix (install gh, `gh auth login`, or a token in Settings ▸ GitHub)."""
         from .status import compute_and_report, summarize_status
 
         # The getters may parse git remotes (blocking, cached) — off the event loop.

@@ -47,6 +47,7 @@ review_tools.py          # 3 verdict tools (comment/approve/request-changes, gua
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
 api.py                   # routers — public PAGES (view/workspace/new-issue) + gated data routes (config/status/issues/prs/issue)
 view.py                  # PAGE = read-only board; NEW_ISSUE_PAGE = file-an-issue form; shared setup card. --pl-* themed
+skills/github/SKILL.md   # workflow manual (review / fix round / CI / issues / merge / release) — host auto-loads skills/
 tests/                   # host-free pytest (gating + version coherence + routes via TestClient + the no-raise sweep)
 ```
 
@@ -191,6 +192,10 @@ run the resolution via `asyncio.to_thread`; checkout remotes are cached 10 min.
 
 - **Host-free.** NEVER import `graph.*` / `plugins.*` at module top — the suite runs
   with only `requirements-dev.txt`. Keep any host imports lazy (inside functions).
+- **Tool descriptions are paid on EVERY model call** (the schema rides each request). Keep each
+  `@tool` docstring a terse single paragraph: what it does, when to use it vs siblings, and
+  hard call-time constraints (guards, caps, refusals). Workflow narrative and examples go in
+  `skills/github/SKILL.md`, not the docstring.
 - **`@tool` docstrings must be PLAIN string literals** — an f-string docstring makes
   `__doc__` None and the tool ships with no description (the model can't see it).
 - **Every tool requires an `owner/name` repo** — validate with `bad_repo()`. The

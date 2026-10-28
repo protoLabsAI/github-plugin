@@ -115,26 +115,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
     async def github_create_issue(
         title: str, repo: str = "", body: str = "", labels: str = "", kind: str = "generic"
     ) -> str:
-        """Create a GitHub issue. Search first (``github_search_issues``) so you don't file
-        a duplicate. The body is GATED like the `/issue` command: it needs a substantive
-        description (>= 80 chars) with a ``## Problem`` (or Motivation/Context) section; a
-        ``bug`` also needs a ``## Steps to reproduce`` / Evidence / Expected-vs-actual
-        section; a ``feature`` needs a ``## Proposed direction`` or ``## Acceptance``
-        section. A body that fails the gate is NOT posted — the tool returns what's
-        missing plus a scaffold to fill in.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            title: Issue title.
-            body: Issue body (Markdown) — use headings for the sections above.
-            labels: Optional comma-separated label names.
-            kind: ``generic`` (default) | ``bug`` | ``feature`` — picks the gate's required
-                sections and adds the type label (``bug`` / ``enhancement``). A ``generic``
-                call whose ``labels`` include ``bug`` / ``enhancement`` is treated as that
-                kind (the repo's CI gate keys on the label).
-
-        Returns the new issue URL, or the gate's "Not filed — missing …" with a scaffold.
-        """
+        """Create an issue; returns its URL. Search first (github_search_issues) so you don't file a duplicate. The body is GATED like /issue; a failing body is NOT posted (you get what's missing + a scaffold): at least 80 chars with a `## Problem` (or Motivation/Context) section; kind=bug also needs `## Steps to reproduce` / Evidence / Expected-vs-actual; kind=feature needs `## Proposed direction` or `## Acceptance`. kind also adds the type label (bug / enhancement); a generic call labelled bug / enhancement is gated as that kind. labels: comma-separated."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -158,15 +139,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_comment(number: int, body: str, repo: str = "") -> str:
-        """Add a comment to a GitHub issue or pull request.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue or PR number (a PR is an issue for commenting).
-            body: The comment body (Markdown).
-
-        Returns the new comment URL.
-        """
+        """Comment on an issue or PR (Markdown); returns the comment URL."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -178,17 +151,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_create_pr(head: str, title: str, repo: str = "", body: str = "", base: str = "main") -> str:
-        """Open a pull request.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            head: The branch with the changes.
-            title: PR title.
-            body: PR body (Markdown).
-            base: Base branch to merge into (default ``main``).
-
-        Returns the new PR URL.
-        """
+        """Open a PR from head into base; returns its URL."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -218,18 +181,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_edit_pr(number: int, repo: str = "", title: str = "", body: str = "", state: str = "") -> str:
-        """Edit a pull request's title/body and/or its draft state.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            title: New title (omit to leave unchanged).
-            body: New body / description (omit to leave unchanged).
-            state: ``ready`` to mark ready for review, ``draft`` to convert back to a
-                draft, or empty to leave the state unchanged.
-
-        Returns the PR URL (or a short summary of what changed).
-        """
+        """Edit a PR's title / body (omit = unchanged) and/or draft state: state=ready marks it ready for review, draft converts it back, empty leaves it."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -258,16 +210,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_edit_issue(number: int, repo: str = "", title: str = "", body: str = "") -> str:
-        """Edit a GitHub issue's title and/or body.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue number.
-            title: New title (omit to leave unchanged).
-            body: New body / description, Markdown (omit to leave unchanged).
-
-        Returns the issue URL (gh's stdout), or an Error when neither title nor body is given.
-        """
+        """Edit an issue's title and/or body (omit = unchanged; at least one is required). Returns the issue URL."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -295,28 +238,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
         dry_run: bool = False,
         confirm: bool = False,
     ) -> str:
-        """Merge a pull request. IRREVERSIBLE — guarded.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            method: ``squash`` (default), ``merge``, or ``rebase``.
-            delete_branch: Delete the head branch after merging (default False).
-            subject: Merge-commit subject line. Squash/merge only — refused on rebase,
-                which GitHub ignores. A single-commit squash uses that COMMIT's subject,
-                not the PR title, unless subject is set — so fixing the PR title alone
-                does not fix the subject that lands on main.
-            body: Merge-commit body. Squash/merge only — refused on rebase.
-            sha: The FULL head commit sha you verified (reviews, checks). When set, the merge
-                happens only if the PR's head is still exactly that commit — a push after
-                your check makes GitHub refuse instead of merging unreviewed code. Can't be
-                combined with delete_branch.
-            dry_run: If true, report what WOULD be merged without merging.
-            confirm: Must be true to actually merge — a guard against accidental or
-                autonomous merges even when the per-agent write gate is on.
-
-        Returns the merge result, a dry-run preview, or a refusal asking for confirm.
-        """
+        """Merge a PR. IRREVERSIBLE: refused unless confirm=true (even with the write gate on); dry_run=true previews instead. method: squash | merge | rebase. subject / body set the merge commit (squash/merge only, refused on rebase); a single-commit squash lands that COMMIT's subject, not the PR title, unless subject is set. sha: the FULL head sha you verified; the merge then happens only if the head is still that commit (can't combine with delete_branch)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -386,17 +308,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
     async def github_close(
         number: int, repo: str = "", kind: str = "issue", reopen: bool = False, comment: str = ""
     ) -> str:
-        """Close (or reopen) an issue or pull request.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue or PR number.
-            kind: ``issue`` (default) or ``pr`` — they use different gh subcommands.
-            reopen: If true, reopen instead of close.
-            comment: Optional comment to post alongside a close (ignored on reopen).
-
-        Returns a short confirmation.
-        """
+        """Close an issue or PR, or reopen it (reopen=true). kind: issue | pr. comment is posted with a close (ignored on reopen)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -415,17 +327,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
     async def github_set_labels(
         number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
     ) -> str:
-        """Add and/or remove labels on an issue or pull request.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue or PR number.
-            add: Comma-separated label names to add.
-            remove: Comma-separated label names to remove.
-            kind: ``issue`` (default) or ``pr``.
-
-        Returns a short confirmation.
-        """
+        """Add and/or remove labels (comma-separated) on an issue or PR (kind: issue | pr). A label that doesn't exist yet: github_create_label first."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -446,19 +348,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_create_label(name: str, repo: str = "", color: str = "", description: str = "") -> str:
-        """Create a new label in a repository (`gh label create`). Does NOT overwrite an
-        existing label — no ``--force`` — so a label that already exists is reported as
-        such, not an error trace, and its color/description are left untouched. Use this
-        before ``github_set_labels`` when the label you want to apply doesn't exist yet.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            name: The label name.
-            color: Optional 6-character hex color (no leading ``#``); gh picks a random one if omitted.
-            description: Optional label description.
-
-        Returns a short confirmation, or a readable "already exists" message.
-        """
+        """Create a repo label (color: 6-char hex without #; random if omitted). Never overwrites: an existing label is reported and left untouched."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -481,17 +371,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
     async def github_set_assignees(
         number: int, repo: str = "", add: str = "", remove: str = "", kind: str = "issue"
     ) -> str:
-        """Add and/or remove assignees on an issue or pull request.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: Issue or PR number.
-            add: Comma-separated GitHub usernames to assign.
-            remove: Comma-separated GitHub usernames to unassign.
-            kind: ``issue`` (default) or ``pr``.
-
-        Returns a short confirmation.
-        """
+        """Add and/or remove assignees (comma-separated usernames) on an issue or PR (kind: issue | pr)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -512,19 +392,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_reply_thread(thread_id: str, body: str, resolve: bool = False) -> str:
-        """Reply INSIDE a pull request review thread (an inline, resolvable conversation — a
-        CodeRabbit or reviewer line comment), optionally resolving it in the same call. Use it
-        after a fix round to answer each finding where it was raised — say what changed and
-        where — then resolve it; a PR-level ``github_comment`` does NOT answer or clear a
-        thread. Get thread ids from ``github_review_threads``.
-
-        Args:
-            thread_id: The review-thread id (``PRRT_…``) from ``github_review_threads``.
-            body: The reply (Markdown).
-            resolve: Also resolve the thread after replying (default False).
-
-        Returns the reply URL (and whether the thread is now resolved).
-        """
+        """Reply INSIDE a PR review thread (thread_id PRRT_… from github_review_threads); resolve=true also resolves it. After a fix round, answer each finding where it was raised (what changed, where); a PR-level github_comment does NOT answer or clear a thread."""
         if err := _bad_thread_id(thread_id):
             return err
         if not (body or "").strip():
@@ -542,17 +410,7 @@ def get_write_tools(default_repo="", emit=None) -> list:
 
     @tool
     async def github_resolve_thread(thread_id: str, unresolve: bool = False) -> str:
-        """Resolve (or unresolve) a pull request review thread. Unresolved threads keep a PR's
-        QA check from clearing and so block auto-merge; resolve one only once its finding is
-        fixed or answered (prefer ``github_reply_thread`` with ``resolve=true`` so the answer
-        is on the thread). Get thread ids from ``github_review_threads``.
-
-        Args:
-            thread_id: The review-thread id (``PRRT_…``) from ``github_review_threads``.
-            unresolve: Re-open a resolved thread instead (default False).
-
-        Returns a short confirmation.
-        """
+        """Resolve (or unresolve=true) a PR review thread (id from github_review_threads). Unresolved threads block the QA check and auto-merge; resolve only once the finding is fixed or answered, preferably via github_reply_thread with resolve=true."""
         if err := _bad_thread_id(thread_id):
             return err
         mutation = "unresolveReviewThread" if unresolve else "resolveReviewThread"

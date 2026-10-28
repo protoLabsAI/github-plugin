@@ -89,17 +89,7 @@ def get_release_read_tools(default_repo="") -> list:
 
     @tool
     async def github_run_jobs(run_id: int, repo: str = "") -> str:
-        """Show one GitHub Actions run and every job in it — status and conclusion per job.
-
-        Args:
-            run_id: The run's id (from github_dispatch_workflow or github_ci_runs).
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-
-        Use it to watch a multi-job workflow (a desktop build's per-platform legs, a
-        release's publish steps): the run is done when its status is ``completed``, and
-        it succeeded only if its conclusion is ``success``. A failed job's log is one
-        github_run_failure call away.
-        """
+        """Show one Actions run and each job's status + conclusion (run_id from github_dispatch_workflow or github_ci_runs), to watch a multi-job workflow. Done when status is `completed`; succeeded only if conclusion is `success`. A failed job's log: github_run_failure."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -129,16 +119,7 @@ def get_release_read_tools(default_repo="") -> list:
 
     @tool
     async def github_release(tag: str, repo: str = "") -> str:
-        """Show a GitHub release by tag: draft / prerelease, whether it is the repo's Latest
-        release, its assets (name and size) and the start of its notes.
-
-        Args:
-            tag: The release tag, e.g. ``v1.4.0``.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-
-        "Latest" is GitHub's promoted release, not the newest tag: a release created
-        with latest=false only becomes Latest when something promotes it.
-        """
+        """Show a release by tag: draft / prerelease, assets (name, size), the start of its notes, and whether it is Latest (GitHub's promoted release, not the newest tag: a latest=false release isn't Latest until promoted)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo) or _bad_tag(tag):
             return err
@@ -172,15 +153,7 @@ def get_release_read_tools(default_repo="") -> list:
 
     @tool
     async def github_release_asset(tag: str, name: str, repo: str = "") -> str:
-        """Read the text of one small asset attached to a release (e.g. ``release-notes.md``).
-
-        Args:
-            tag: The release tag, e.g. ``v1.4.0``.
-            name: The asset's exact file name.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-
-        Returns the asset's text (up to 200 KB). Binary assets aren't readable here.
-        """
+        """Read the text (up to 200 KB) of one release asset by its exact file name, e.g. release-notes.md. Binary assets aren't readable."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo) or _bad_tag(tag):
             return err
@@ -213,19 +186,7 @@ def get_release_write_tools(default_repo="") -> list:
     async def github_dispatch_workflow(
         workflow: str, repo: str = "", inputs: str = "", ref: str = "main", confirm: bool = False
     ) -> str:
-        """Start a manually-dispatched (workflow_dispatch) GitHub Actions workflow and return
-        the run it started.
-
-        Args:
-            workflow: The workflow FILE name (e.g. ``prepare-release.yml``) or its numeric id.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            inputs: The workflow's inputs as ``key=value`` pairs, comma or newline separated
-                (e.g. ``bump=minor, dry_run=true`` or ``tag=v1.4.0``).
-            ref: The branch or tag whose copy of the workflow runs (default ``main``).
-            confirm: Must be true — a dispatch has real effects (opens PRs, builds, publishes).
-
-        Returns the new run's id and url — watch it with github_run_jobs.
-        """
+        """Start a workflow_dispatch workflow (FILE name, e.g. prepare-release.yml, or numeric id) from ref (default main); returns the run id + URL, watch it with github_run_jobs. inputs: key=value pairs, comma or newline separated. confirm must be true: a dispatch has real effects (opens PRs, builds, publishes)."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -274,20 +235,7 @@ def get_release_write_tools(default_repo="") -> list:
     async def github_create_tag(
         tag: str, sha: str, repo: str = "", message: str = "", verify_version: bool = True, confirm: bool = False
     ) -> str:
-        """Create an ANNOTATED tag at an exact commit and push it (via the git API).
-
-        Args:
-            tag: The tag to create, e.g. ``v1.4.0``.
-            sha: The FULL 40-character commit sha to tag — for a release, the release PR's
-                merge commit, not whatever main points at now.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            message: The tag message (default ``Release <tag>``).
-            verify_version: Check first that ``pyproject.toml`` at that commit declares the
-                tag's version (default true; skipped when the repo has no pyproject.toml).
-            confirm: Must be true — a pushed tag triggers release workflows and is never moved.
-
-        Refuses when the tag already exists: a published tag is never moved.
-        """
+        """Create and push an ANNOTATED tag at an exact commit. sha: the FULL 40-char sha; for a release, the release PR's merge commit, not current main. verify_version checks that pyproject.toml at that commit declares the tag's version (skipped if absent). confirm must be true: a pushed tag triggers release workflows. Refuses if the tag exists; a published tag is never moved."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo) or _bad_tag(tag):
             return err
@@ -364,14 +312,7 @@ def get_release_write_tools(default_repo="") -> list:
 
     @tool
     async def github_edit_release(tag: str, notes: str, repo: str = "", confirm: bool = False) -> str:
-        """Replace a release's notes (its body on the GitHub release page).
-
-        Args:
-            tag: The release tag, e.g. ``v1.4.0``.
-            notes: The complete new notes, in Markdown. They REPLACE the old body.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            confirm: Must be true — the release page is public.
-        """
+        """Replace a release's notes: `notes` is the complete new Markdown body. confirm must be true: the release page is public."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo) or _bad_tag(tag):
             return err
@@ -394,18 +335,7 @@ def get_release_write_tools(default_repo="") -> list:
     async def github_upload_release_asset(
         tag: str, name: str, content: str, repo: str = "", clobber: bool = False, confirm: bool = False
     ) -> str:
-        """Upload text as a release asset under exactly ``name`` (e.g. ``release-notes.md``).
-
-        Args:
-            tag: The release tag, e.g. ``v1.4.0``.
-            name: The asset's file name — it is published under exactly this name.
-            content: The asset's text.
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            clobber: Replace an existing asset of the same name (default false: refuse).
-            confirm: Must be true — release assets are public, and some are read by updaters.
-
-        Read it back with github_release_asset to check what landed.
-        """
+        """Upload text as a release asset published under exactly `name`. clobber=true replaces a same-name asset (default: refuse). confirm must be true: assets are public and some are read by updaters. Check it with github_release_asset."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo) or _bad_tag(tag):
             return err
