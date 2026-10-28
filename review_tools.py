@@ -146,17 +146,7 @@ def get_review_tools(default_repo="") -> list:
 
     @tool
     async def github_review_comment(number: int, body: str, repo: str = "") -> str:
-        """Post a formal non-blocking COMMENT review on a pull request.
-
-        The always-safe verdict: use it for findings while CI is still running, for
-        observations that shouldn't block a merge, or when a blocking verdict was
-        refused by its guards.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            body: The review body (findings, observations — markdown).
-        """
+        """Post a non-blocking COMMENT review on a PR: the always-safe verdict, for findings while CI runs, observations that shouldn't block a merge, or when a blocking verdict was refused."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -166,18 +156,7 @@ def get_review_tools(default_repo="") -> list:
 
     @tool
     async def github_review_approve(number: int, body: str, repo: str = "") -> str:
-        """Post a formal APPROVE review on a pull request. GUARDED.
-
-        Refused (with comment-instead guidance) while any check run is still
-        running, when CI cannot be read at all, or on a PR this agent authored.
-        An APPROVE clears the way to merge — it must reflect the PR's settled,
-        verified state, never a guess.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            body: The review body (what was verified, any non-blocking notes).
-        """
+        """Post an APPROVE review on a PR. GUARDED: refused while any check is still running, when CI can't be read, or on a PR this agent authored. Approve only the settled, verified state, never a guess; body says what you verified."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -189,18 +168,7 @@ def get_review_tools(default_repo="") -> list:
 
     @tool
     async def github_review_request_changes(number: int, body: str, repo: str = "") -> str:
-        """Post a formal REQUEST_CHANGES review on a pull request. GUARDED.
-
-        Refused (with comment-instead guidance) while any check run is still
-        running, when CI cannot be read at all, or on a PR this agent authored.
-        A broken-CI block must rest on a check that COMPLETED with a failure you
-        read — never on one still running or one you couldn't see.
-
-        Args:
-            repo: Repository as ``owner/name``. Omit to use the agent's configured default repo.
-            number: PR number.
-            body: The review body — every blocking finding with file:line evidence.
-        """
+        """Post a REQUEST_CHANGES review on a PR. GUARDED: refused while any check is still running, when CI can't be read, or on a PR this agent authored. A broken-CI block must rest on a check that COMPLETED failing and that you read. body: every blocking finding with file:line evidence."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
