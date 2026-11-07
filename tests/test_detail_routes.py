@@ -456,7 +456,7 @@ async def test_failure_tool_keeps_error_filtering_with_shared_fetcher():
     tool = next(t for t in get_read_tools() if t.name == "github_run_failure")
     log = "step\tsetup\nstep\terror: bad\nstep\terror: bad\nstep\tdone\n"
     with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, log, ""))):
-        result = await tool.ainvoke({"repo": "o/n", "run_id": 9})
+        result = await tool.ainvoke({"repo": "o/n", "run_id": 9, "context": 0})
     assert result == "o/n run 9 — failure log (1 line(s)):\nerror: bad"
 
 

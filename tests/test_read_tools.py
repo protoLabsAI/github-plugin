@@ -1256,3 +1256,83 @@ async def test_get_body_unexpected_shape_never_raises(kind, body):
     with patch("ghplugin.read_tools.run_gh", AsyncMock(return_value=(0, json.dumps({"body": body}), ""))):
         result = await tool.ainvoke({"repo": "owner/name", "number": 1})
     assert isinstance(result, str)
+
+
+# ── github_run_failure: preserve diagnostics before retry warnings ──────────────
+
+
+async def _failure(log, **kwargs):
+    mock = AsyncMock(return_value=(0, log, ""))
+    with patch("ghplugin.read_tools.run_gh", mock):
+        result = await _tool("github_run_failure").ainvoke({"repo": "owner/name", "run_id": 62, **kwargs})
+    mock.assert_awaited_once_with(["run", "view", "62", "--repo", "owner/name", "--log-failed"], timeout=60)
+    return result
+
+
+def _retry_lines():
+    return [
+        line
+        for attempt in range(1, 5)
+        for line in (
+            f"codesign: signature {attempt}",
+            f"spctl: assessment {attempt}",
+            f"stapler: ticket {attempt}",
+            f"::warning:: macOS artifact check failed (attempt {attempt}/4)",
+        )
+    ]
+
+
+async def test_run_failure_default_context_keeps_retry_diagnostics():
+    lines = _retry_lines()
+    log = "\n".join(f"job\tstep\t{line}" for line in lines)
+    out = await _failure(log)
+    assert out.splitlines()[1:] == lines
+
+
+async def test_run_failure_zero_context_preserves_error_only_deduplication():
+    lines = _retry_lines()
+    out = await _failure("\n".join(lines + [lines[-1]]), context=0)
+    assert out.splitlines()[1:] == lines[3::4]
+
+
+@pytest.mark.parametrize("context", [0, 1])
+async def test_run_failure_grep_replaces_default_filter_case_insensitively(context):
+    lines = ["setup", "SPCTL: assessment", "stapler: ticket", "error: unrelated"]
+    out = await _failure("\n".join(lines), grep="spctl|stapler", context=context)
+    assert out.splitlines()[1:] == lines[1 - context : 3]
+
+
+async def test_run_failure_invalid_grep_returns_error_before_fetch():
+    mock = AsyncMock()
+    with patch("ghplugin.read_tools.run_gh", mock):
+        out = await _tool("github_run_failure").ainvoke({"repo": "owner/name", "run_id": 62, "grep": "["})
+    assert out.startswith("Error: invalid grep regex:")
+    mock.assert_not_called()
+
+
+@pytest.mark.parametrize("cap", [5, 8, 12])
+async def test_run_failure_budget_keeps_latest_context_and_matches(cap):
+    lines = _retry_lines()
+    out = await _failure("\n".join(lines), context=3, max_lines=cap)
+    assert out.splitlines()[1:] == lines[-cap:]
+
+
+@pytest.mark.parametrize("context, count", [(-1, 1), (0, 1), (5, 6), (20, 21), (99, 21)])
+async def test_run_failure_context_is_clamped(context, count):
+    lines = [f"diagnostic {i}" for i in range(30)] + ["failed"]
+    out = await _failure("\n".join(lines), context=context)
+    assert out.splitlines()[1:] == lines[-count:]
+
+
+async def test_run_failure_default_no_match_falls_back_but_grep_does_not():
+    lines = [f"diagnostic {i}" for i in range(10)]
+    log = "\n".join(lines)
+    assert (await _failure(log, max_lines=5)).splitlines()[1:] == lines[-5:]
+    assert await _failure(log, grep="spctl") == "Run 62 in owner/name: no failed-step log lines matched grep."
+    assert "no failed-step log lines (run may not have failed" in await _failure("")
+
+
+async def test_run_failure_retains_line_length_and_upper_budget_limits():
+    lines = [f"error {i}: " + "x" * 250 for i in range(100)]
+    out = await _failure("\n".join(lines), max_lines=100)
+    assert out.splitlines()[1:] == [line[:200] for line in lines[-80:]]
