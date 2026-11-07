@@ -476,27 +476,40 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         return f"{repo} — {len(runs)} recent run(s):\n" + "\n".join(lines)
 
     @tool
-    async def github_run_failure(run_id: int, repo: str = "", max_lines: int = 40) -> str:
-        """Explain why an Actions run failed: the error lines from its failed steps. run_id = databaseId from github_ci_runs; max_lines up to 80."""
+    async def github_run_failure(
+        run_id: int, repo: str = "", max_lines: int = 40, context: int = 5, grep: str = ""
+    ) -> str:
+        """Explain why an Actions run failed: error lines plus context preceding lines (default 5, clamped 0..20); optional case-insensitive regex grep replaces the error filter. run_id = databaseId from github_ci_runs; max_lines clamped 5..80, keeping the latest lines."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
         cap = max(5, min(int(max_lines), 80))
+        context = max(0, min(int(context), 20))
+        try:
+            pattern = re.compile(grep, re.IGNORECASE) if grep else _CI_ERR_RE
+        except re.error as exc:
+            return f"Error: invalid grep regex: {exc}"
         result = await fetch_failure_log(repo, run_id)
         if "error" in result:
             return result["error"]
         out = result["log"]
         raw = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
+        messages = [ln.split("\t")[-1] for ln in raw]
+        selected: set[int] = set()
+        for i, msg in enumerate(messages):
+            if pattern.search(msg):
+                selected.update(range(max(0, i - context), i + 1))
         seen: set = set()
         uniq: list[str] = []
-        for ln in raw:
-            msg = ln.split("\t")[-1]
-            if _CI_ERR_RE.search(msg):
-                key = msg[:120]
-                if key not in seen:
-                    seen.add(key)
-                    uniq.append(msg[:200])
-        picked = uniq[-cap:] if uniq else [ln.split("\t")[-1][:200] for ln in raw[-cap:]]
+        for i in sorted(selected):
+            msg = messages[i]
+            key = msg[:120]
+            if key not in seen:
+                seen.add(key)
+                uniq.append(msg[:200])
+        if grep and not selected:
+            return f"Run {run_id} in {repo}: no failed-step log lines matched grep."
+        picked = uniq[-cap:] if uniq else [msg[:200] for msg in messages[-cap:]]
         if not picked:
             return f"Run {run_id} in {repo}: no failed-step log lines (run may not have failed, or its logs expired)."
         return f"{repo} run {run_id} — failure log ({len(picked)} line(s)):\n" + "\n".join(picked)
