@@ -99,10 +99,6 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   #wrap{display:flex;flex-direction:column;height:100%;min-height:0}
   .bar{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;
     border-bottom:var(--pl-border-width,1px) solid var(--pl-color-border)}
-  .tabs{display:inline-flex;border:1px solid var(--pl-color-border);border-radius:var(--pl-radius,8px);overflow:hidden}
-  .tab{padding:4px 11px;cursor:pointer;background:transparent;border:0;color:var(--pl-color-fg-muted);
-    font-size:12px;line-height:1.6;white-space:nowrap}
-  .tab[aria-selected="true"]{background:var(--pl-color-bg);color:var(--pl-color-fg);font-weight:600}
   select{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
     border-radius:var(--pl-radius,8px);padding:4px 6px;font-size:12px;max-width:220px}
   #search{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
@@ -115,16 +111,13 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-bottom:1px solid var(--pl-color-border)}
   .row:hover{background:var(--pl-color-bg)}
   .row .top{display:flex;align-items:baseline;gap:7px}
-  .dot{width:9px;height:9px;border-radius:50%;flex:none;margin-top:4px;background:var(--pl-color-fg-muted)}
-  .dot.open{background:#3fb950}.dot.closed{background:#a371f7}.dot.merged{background:#a371f7}.dot.draft{background:var(--pl-color-fg-muted)}
   .title{font-weight:600;line-height:1.35}
   .num{color:var(--pl-color-fg-muted);font-weight:400}
   .meta{margin-top:3px;font-size:11px;color:var(--pl-color-fg-muted);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
   .cmt{display:inline-flex;align-items:center;gap:3px}
-  .pill{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--pl-color-border)}
   /* CI rollup chip on PR rows (bd-nm78.8) — ✓/✗/● tinted from the list dot palette. */
   .ci{font-weight:700;line-height:1;font-size:12px}
-  .ci-passing{color:#3fb950}.ci-failing{color:#f85149}.ci-pending{color:#d29922}
+  .ci-passing{color:var(--pl-color-status-success)}.ci-failing{color:var(--pl-color-status-error)}.ci-pending{color:var(--pl-color-status-warning)}
   .more{padding:10px 12px;text-align:center}
   .empty,.hint{padding:24px 14px;text-align:center;color:var(--pl-color-fg-muted)}
   #scrim{display:none;position:fixed;inset:0;background:#0006;z-index:10}
@@ -136,42 +129,22 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   @media(min-width:1000px){#drawer.wide{width:min(780px,96vw)}}
   .dh{padding:12px;display:flex;align-items:flex-start;gap:8px}
   .dh h2{font-size:16px;margin:0;overflow-wrap:anywhere;flex:1}
-  .dx{background:transparent;border:0;color:inherit;cursor:pointer;font-size:18px}
   #drawer-meta{padding:0 12px 12px;display:flex;gap:12px;align-items:center}
   #drawer-tabs{padding:0 12px;border-bottom:1px solid var(--pl-color-border)}
   #drawer-body{padding:12px;overflow:auto;min-height:0;overflow-wrap:anywhere}
   .pr-body{margin-top:16px;overflow-wrap:anywhere;min-width:0}
   .md:not(.md-on){white-space:pre-wrap}
-  .md h1{font-size:18px}.md h2{font-size:16px}.md h3{font-size:14px}
-  .md h4,.md h5,.md h6{font-size:13px}
-  .md h1,.md h2,.md h3,.md h4,.md h5,.md h6{margin:12px 0 6px}
-  .md p{margin:6px 0}.md ul,.md ol{padding-left:24px;margin:6px 0}
-  .md blockquote{margin:8px 0;padding-left:10px;border-left:3px solid var(--pl-color-border);
-    color:var(--pl-color-fg-muted)}
-  .md code,.md pre{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);
-    font-size:12px;background:var(--pl-color-bg-raised);border-radius:var(--pl-radius,8px)}
-  .md code{padding:1px 4px}.md pre{padding:8px;white-space:pre;overflow-x:auto}
-  .md pre code{padding:0;overflow-wrap:normal}
   .md .md-table{overflow-x:auto;margin:8px 0}
-  .md table{border-collapse:collapse}.md th,.md td{border:1px solid var(--pl-color-border);padding:4px 8px}
   .conversation-item{padding:10px 0;border-bottom:1px solid var(--pl-color-border)}
   .thread-hunk{font-family:var(--pl-font-mono,monospace);font-size:11px;white-space:pre-wrap}
   .pr-facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0}
   .pr-facts dd{margin:0}
-  /* Checks + Files tabs (bd-nm78.5) — dots reuse the list palette; diff tints from --pl-* with fallbacks. */
+  /* Checks + Files tabs (bd-nm78.5) — dots reuse the list palette; diff tints from --pl-* status tokens. */
   .d-sum{font-size:12px;color:var(--pl-color-fg-muted);margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
   .d-sum b{color:var(--pl-color-fg);font-weight:600}
-  .chk-badge{margin-left:5px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;
-    background:var(--pl-color-danger-muted,#f8514926);color:var(--pl-color-danger,#f85149)}
-  .dot.pass{background:#3fb950}.dot.fail{background:#f85149}.dot.pending{background:#d29922}.dot.skipped{background:var(--pl-color-fg-muted)}
   .chk{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--pl-color-border)}
-  .chk .dot{margin-top:0}
   .chk-name{flex:1;overflow-wrap:anywhere}
   .chk-dur{font-size:11px;color:var(--pl-color-fg-muted);white-space:nowrap}
-  .lnk{color:var(--pl-color-accent,#2f81f7);text-decoration:none;white-space:nowrap}
-  .lnk:hover{text-decoration:underline}
-  .logbtn{background:transparent;border:1px solid var(--pl-color-border);border-radius:var(--pl-radius,8px);
-    color:inherit;cursor:pointer;font-size:11px;padding:2px 8px;white-space:nowrap}
   .log{margin:2px 0 10px;padding:8px;border-radius:var(--pl-radius,8px);background:var(--pl-color-bg);
     font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-size:11px;white-space:pre;overflow-x:auto;max-height:320px}
   .file{border-bottom:1px solid var(--pl-color-border)}
@@ -179,32 +152,26 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     cursor:pointer;text-align:left;padding:8px 2px;font-size:12px;font-family:inherit}
   .file-head:hover{background:var(--pl-color-bg)}
   .fstat{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-weight:600;width:1.2em;flex:none;text-align:center}
-  .fstat.added{color:#3fb950}.fstat.deleted{color:#f85149}.fstat.renamed{color:#a371f7}.fstat.modified{color:#d29922}
+  .fstat.added{color:var(--pl-color-status-success)}.fstat.deleted{color:var(--pl-color-status-error)}.fstat.renamed{color:var(--pl-color-status-info)}.fstat.modified{color:var(--pl-color-status-warning)}
   .fpath{flex:1;overflow-wrap:anywhere}
-  .fnum{font-size:11px;white-space:nowrap}.fnum .add{color:#3fb950}.fnum .del{color:#f85149}
+  .fnum{font-size:11px;white-space:nowrap}.fnum .add{color:var(--pl-color-status-success)}.fnum .del{color:var(--pl-color-status-error)}
   .diff{margin:0 0 8px;overflow-x:auto;background:var(--pl-color-bg);border-radius:var(--pl-radius,8px)}
   .dl{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-size:11px;white-space:pre;padding:0 8px;min-width:max-content}
-  .dl.add{background:var(--pl-color-success-muted,#3fb95026)}
-  .dl.del{background:var(--pl-color-danger-muted,#f8514926)}
+  .dl.add{background:color-mix(in srgb, var(--pl-color-status-success) 15%, transparent)}
+  .dl.del{background:color-mix(in srgb, var(--pl-color-status-error) 15%, transparent)}
   .dl.hunk{color:var(--pl-color-fg-muted)}
   .note{padding:6px 8px 10px;color:var(--pl-color-fg-muted);font-size:12px}
   /* Issue drawer (bd-nm78.7) — neutral count badge + linked-PR chips. */
-  .d-count{margin-left:5px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;
-    background:var(--pl-color-bg);border:1px solid var(--pl-color-border);color:var(--pl-color-fg-muted)}
   .linked-prs{margin-top:14px}
   .linked-prs h3{font-size:13px;margin:0 0 6px}
-  .chip{display:inline-block;margin:0 5px 5px 0;padding:2px 9px;border-radius:999px;cursor:pointer;
-    font:inherit;font-size:12px;background:var(--pl-color-bg);border:1px solid var(--pl-color-border);
-    color:var(--pl-color-accent,#2f81f7)}
-  .chip:hover{text-decoration:underline}
 __SETUP_CSS__
 </style></head><body>
 <div id="wrap">
   <div class="bar">
     <select id="repo" title="Repository"></select>
-    <div class="tabs" role="tablist">
-      <button class="tab" id="t-issues" role="tab" aria-selected="true" title="Issues">Issues</button>
-      <button class="tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests">PRs</button>
+    <div class="pl-tabs" role="tablist">
+      <button class="pl-tab pl-tab--active" id="t-issues" role="tab" aria-selected="true" title="Issues">Issues</button>
+      <button class="pl-tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests">PRs</button>
     </div>
     <select id="state" title="State"><option value="open">Open</option><option value="closed">Closed</option><option value="all">All</option></select>
     <input id="search" type="search" placeholder="Search…" title="Search (Enter to run, Esc to clear)" aria-label="Search" autocomplete="off" />
@@ -218,9 +185,9 @@ __SETUP_CSS__
 <div id="scrim"></div>
 <div id="drawer" class="wide" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
   <div class="dh"><h2 id="drawer-title">Pull request</h2>
-    <button class="dx" id="drawer-close" type="button" aria-label="Close">✕</button></div>
+    <button class="pl-iconbtn" id="drawer-close" type="button" aria-label="Close">✕</button></div>
   <div id="drawer-meta"></div>
-  <div id="drawer-tabs" role="tablist" aria-label="Pull request views"></div>
+  <div id="drawer-tabs" role="tablist" class="pl-tabs" aria-label="Pull request views"></div>
   <div id="drawer-body" role="tabpanel" tabindex="0"></div>
 </div>
 <script type="module">
@@ -338,8 +305,8 @@ __SETUP_CSS__
     refresh: svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
   };
 
-  function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); reload(); }
-  function labelPills(labels){ return (labels||[]).slice(0,5).map(l => '<span class="pill">'+esc(l.name||l)+'</span>').join(" "); }
+  function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); $("t-issues").classList.toggle("pl-tab--active", t==="issues"); $("t-prs").classList.toggle("pl-tab--active", t==="prs"); reload(); }
+  function labelPills(labels){ return (labels||[]).slice(0,5).map(l => '<span class="pl-badge">'+esc(l.name||l)+'</span>').join(" "); }
 
   function issueRow(it, repo){
     const st = (it.state||"").toLowerCase();
@@ -349,7 +316,7 @@ __SETUP_CSS__
     // data-issue/data-repo let a plain click open the drawer (bd-nm78.7); the href stays so a
     // modified (cmd/ctrl/middle) click still follows through to github.com — same split as PR rows.
     return '<a class="row" data-issue="'+esc(it.number)+'" data-repo="'+esc(repo)+'" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
-      + '<div class="top"><span class="dot '+(st==="closed"?"closed":"open")+'"></span>'
+      + '<div class="top"><span class="pl-dot '+(st==="closed"?"pl-dot--info":"pl-dot--success")+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
       + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
       + (cc?('<span class="cmt" title="'+esc(cc)+' comment'+(cc===1?'':'s')+'">'+ICON.comment+esc(cc)+'</span>'):'')+' '+labelPills(it.labels)+'</div></a>';
@@ -370,12 +337,12 @@ __SETUP_CSS__
     const merged = (it.state||"").toLowerCase()==="merged", draft = !!it.isDraft;
     const review = it.reviewDecision ? String(it.reviewDecision).toLowerCase().replace(/_/g," ") : "";
     return '<a class="row" data-pr="'+esc(it.number)+'" data-repo="'+esc(repo)+'" href="'+esc(it.url)+'" target="_blank" rel="noreferrer">'
-      + '<div class="top"><span class="dot '+(merged?"merged":(draft?"draft":"open"))+'"></span>'
+      + '<div class="top"><span class="pl-dot '+(merged || (it.state||"").toLowerCase()==="closed"?"pl-dot--info":(draft?"":"pl-dot--success"))+'"></span>'
       + '<span class="title">'+esc(it.title)+' <span class="num">#'+esc(it.number)+'</span></span></div>'
       + '<div class="meta"><span>'+esc((it.author&&it.author.login)||"?")+'</span><span>'+esc(fmtDate(it.createdAt))+'</span>'
       + checksChip(it.checks)
-      + (it.headRefName?('<span class="pill">'+esc(it.headRefName)+'</span>'):'')
-      + (draft?'<span class="pill">draft</span>':'')+(review?('<span class="pill">'+esc(review)+'</span>'):'')
+      + (it.headRefName?('<span class="pl-badge">'+esc(it.headRefName)+'</span>'):'')
+      + (draft?'<span class="pl-badge">draft</span>':'')+(review?('<span class="pl-badge">'+esc(review)+'</span>'):'')
       + ' '+labelPills(it.labels)+'</div></a>';
   }
 
@@ -404,7 +371,7 @@ __SETUP_CSS__
       + '<dt>Created</dt><dd>'+esc(fmtDate(it.createdAt))+'</dd>'
       + '<dt>Updated</dt><dd>'+esc(fmtDate(it.updatedAt))+'</dd></dl>'
       + '<p class="reviewers">'+reviewerSummary(it)+'</p>'
-      + '<div class="pr-body md" data-md="'+esc(it.body||"")+'">'+esc(it.body||"")+'</div>'
+      + '<div class="pr-body md pl-prose" data-md="'+esc(it.body||"")+'">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '');
   }
   // --- issue mode (bd-nm78.7) -------------------------------------------------
@@ -424,13 +391,13 @@ __SETUP_CSS__
       .filter(p => p && p.number != null);
     const linked = prs.length
       ? '<div class="linked-prs"><h3>Linked pull requests</h3>'
-        + prs.map(p => '<button type="button" class="chip" data-linked-pr="'+esc(p.number)
+        + prs.map(p => '<button type="button" class="pl-btn pl-btn--sm pl-btn--ghost" data-linked-pr="'+esc(p.number)
             +'" data-linked-repo="'+esc(p.repository && p.repository.owner && p.repository.owner.login && p.repository.name
               ? p.repository.owner.login+'/'+p.repository.name : '')+'">#'
             + esc(p.number)+(p.title ? ' '+esc(p.title) : '')+'</button>').join("")+'</div>'
       : '';
     return facts + linked
-      + '<div class="pr-body md" data-md="'+esc(it.body||"")+'">'+esc(it.body||"")+'</div>'
+      + '<div class="pr-body md pl-prose" data-md="'+esc(it.body||"")+'">'+esc(it.body||"")+'</div>'
       + (it.body_truncated ? '<p>Body truncated — see GitHub.</p>' : '');
   }
   function issueComments(data){
@@ -444,8 +411,8 @@ __SETUP_CSS__
     const reason = data.stateReason ? String(data.stateReason).toLowerCase().replace(/_/g," ") : "";
     $("drawer-title").innerHTML = '#'+esc(data.number)+' '+esc(data.title);
     const href = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/issues/"+encodeURIComponent(drawer.number);
-    $("drawer-meta").innerHTML = '<span class="pill">'+esc(reason ? state+" · "+reason : state)+'</span> '
-      + '<a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
+    $("drawer-meta").innerHTML = '<span class="pl-badge pl-badge--'+(state==="open"?"success":"info")+'">'+esc(reason ? state+" · "+reason : state)+'</span> '
+      + '<a class="pl-link" href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
   }
   function reviewState(state){
     return state === "APPROVED" ? "approved" : state === "CHANGES_REQUESTED" ? "changes requested" : "commented";
@@ -472,9 +439,9 @@ __SETUP_CSS__
     const href = typeof c.url === "string" && c.url.startsWith("https://") ? c.url : fallback;
     const author = typeof c.author === "string" ? c.author : (c.author && c.author.login)||"?";
     return '<article class="conversation-item"><div class="meta">'+esc(author)+' · '+esc(relativeTime(c.submittedAt||c.createdAt))
-      + (review ? ' <span class="pill">'+esc(reviewState(c.state))+'</span>' : '')
-      + ' <a class="lnk" href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">↗</a></div>'
-      + '<div class="pr-body md" data-md="'+esc(c.body||"")+'">'+esc(c.body||"")+'</div>'
+      + (review ? ' <span class="pl-badge">'+esc(reviewState(c.state))+'</span>' : '')
+      + ' <a class="pl-link" href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">↗</a></div>'
+      + '<div class="pr-body md pl-prose" data-md="'+esc(c.body||"")+'">'+esc(c.body||"")+'</div>'
       + (c.truncated ? '<p>Body truncated — read the rest on GitHub.</p>' : '')+'</article>';
   }
   function prConversation(data){
@@ -491,8 +458,8 @@ __SETUP_CSS__
         const open = drawer.threadOpen.get(t.id), comments = Array.isArray(t.comments) ? t.comments : [];
         return '<section class="review-thread"><button type="button" class="file-head" data-thread="'+esc(t.id)+'" aria-expanded="'+open+'">'
           + esc(t.path)+':'+esc(t.line == null ? "?" : t.line)
-          + (t.isResolved ? ' <span class="pill">resolved</span>' : '')
-          + (t.isOutdated ? ' <span class="pill">outdated</span>' : '')+'</button>'
+          + (t.isResolved ? ' <span class="pl-badge">resolved</span>' : '')
+          + (t.isOutdated ? ' <span class="pl-badge">outdated</span>' : '')+'</button>'
           + (open ? (comments[0] && comments[0].diffHunk ? '<pre class="thread-hunk">'+esc(comments[0].diffHunk)+'</pre>' : '')
             + comments.map(c => conversationItem(c)).join("") : '')+'</section>';
       }).join("") || '<p>No review threads.</p>');
@@ -520,10 +487,10 @@ __SETUP_CSS__
       const dur = fmtDur(c.started_at, c.completed_at);
       const failing = cat==="fail" && c.run_id != null;
       const st = failing ? logs[c.run_id] : null;
-      let row = '<div class="chk"><span class="dot '+cat+'"></span><span class="chk-name">'+name+'</span>'
+      let row = '<div class="chk"><span class="pl-dot '+({pass:"pl-dot--success",fail:"pl-dot--error",pending:"pl-dot--warning"}[cat]||"")+'"></span><span class="chk-name">'+name+'</span>'
         + (dur ? '<span class="chk-dur">'+esc(dur)+'</span>' : '')
-        + (c.url ? '<a class="lnk" href="'+esc(c.url)+'" target="_blank" rel="noreferrer">details ↗</a>' : '')
-        + (failing ? '<button type="button" class="logbtn" data-run-id="'+esc(c.run_id)+'" aria-expanded="'
+        + (c.url ? '<a class="pl-link" href="'+esc(c.url)+'" target="_blank" rel="noreferrer">details ↗</a>' : '')
+        + (failing ? '<button type="button" class="pl-btn pl-btn--sm pl-btn--ghost" data-run-id="'+esc(c.run_id)+'" aria-expanded="'
             + (st&&st.open?"true":"false")+'">'+(st&&st.open?"Hide failure log":"Show failure log")+'</button>' : '')
         + '</div>';
       if(st && st.open){
@@ -557,7 +524,7 @@ __SETUP_CSS__
     const href = prFilesHref();
     const head = '<div class="d-sum"><span><b>'+esc(files.length)+'</b> file'+(files.length===1?"":"s")+' changed</span>'
       + '<span class="fnum"><span class="add">+'+esc(add)+'</span> <span class="del">−'+esc(del)+'</span></span>'
-      + (data.total_truncated ? '<span><a class="lnk" href="'+esc(href)+'" target="_blank" rel="noreferrer">'
+      + (data.total_truncated ? '<span><a class="pl-link" href="'+esc(href)+'" target="_blank" rel="noreferrer">'
           + 'some diffs truncated — view on GitHub ↗</a></span>' : '')+'</div>';
     if(!files.length) return head + '<div class="empty">No file changes.</div>';
     const rows = files.map((f,i) => {
@@ -571,7 +538,7 @@ __SETUP_CSS__
       if(o){
         if(f.binary || f.truncated || f.patch == null){
           const why = f.binary ? "Binary file" : "Diff too large to show here";
-          row += '<div class="note">'+esc(why)+' — <a class="lnk" href="'+esc(href)+'" target="_blank" rel="noreferrer">view on GitHub ↗</a></div>';
+          row += '<div class="note">'+esc(why)+' — <a class="pl-link" href="'+esc(href)+'" target="_blank" rel="noreferrer">view on GitHub ↗</a></div>';
         } else {
           row += '<div class="diff">'+renderPatch(f.patch)+'</div>';
         }
@@ -582,13 +549,13 @@ __SETUP_CSS__
   }
   function tabBadge(t){
     // Comments carries a neutral count (even 0, once loaded); checks/conversation keep the alert badge.
-    if(t==="comments") return drawer.commentCount == null ? "" : '<span class="d-count">'+esc(drawer.commentCount)+'</span>';
+    if(t==="comments") return drawer.commentCount == null ? "" : '<span class="pl-badge">'+esc(drawer.commentCount)+'</span>';
     const count = t==="checks" ? drawer.checksFail : t==="conversation" ? drawer.unresolved : 0;
-    return count > 0 ? '<span class="chk-badge">'+esc(count)+'</span>' : '';
+    return count > 0 ? '<span class="pl-badge pl-badge--error">'+esc(count)+'</span>' : '';
   }
   function renderDrawerTabs(){
     $("drawer-tabs").innerHTML = Object.entries(drawer.tabs).map(([t, spec]) => {
-      return '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="tab"'
+      return '<button type="button" role="tab" id="dtab-'+esc(t)+'" class="pl-tab'+(t===drawer.tab?' pl-tab--active':'')+'"'
         + ' aria-selected="'+(t===drawer.tab)+'" aria-controls="drawer-body" tabindex="'+(t===drawer.tab?0:-1)+'"'
         + ' data-drawer-tab="'+esc(t)+'">'+esc(spec.label)+tabBadge(t)+'</button>';
     }).join("");
@@ -649,7 +616,7 @@ __SETUP_CSS__
     $("drawer-title").innerHTML = '#'+esc(data.number)+' '+esc(data.title);
     // Construct the link from the requested identity; never trust an API URL scheme.
     const href = "https://github.com/"+drawer.repo.split("/").map(encodeURIComponent).join("/")+"/pull/"+encodeURIComponent(drawer.number);
-    $("drawer-meta").innerHTML = '<span class="pill">'+esc(pill)+'</span> <a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
+    $("drawer-meta").innerHTML = '<span class="pl-badge'+(pill==="draft"?"":" pl-badge--"+(pill==="open"?"success":"info"))+'">'+esc(pill)+'</span> <a class="pl-link" href="'+esc(href)+'" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>';
   }
   // Re-render the active tab's body from the last snapshot — called by the poller AND by the
   // in-body toggles (log / file / thread expand), so a toggle survives the next unchanged-snapshot poll.
@@ -939,5 +906,7 @@ __SETUP_JS__
 </script></body></html>"""
 
 # Splice the shared setup card into both pages — one source, two surfaces.
-PAGE = PAGE.replace("__SETUP_CSS__", _SETUP_CSS).replace("__SETUP_JS__", _SETUP_JS)
+PAGE = PAGE.replace("__SETUP_CSS__", _SETUP_CSS.replace("#d29922", "var(--pl-color-status-warning)")).replace(
+    "__SETUP_JS__", _SETUP_JS
+)
 NEW_ISSUE_PAGE = NEW_ISSUE_PAGE.replace("__SETUP_CSS__", _SETUP_CSS).replace("__SETUP_JS__", _SETUP_JS)
