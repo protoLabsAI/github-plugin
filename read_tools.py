@@ -200,6 +200,29 @@ def _one_line(text: str, cap: int) -> str:
     return t if len(t) <= cap else t[: cap - 1] + "…"
 
 
+# A review bot (CodeRabbit) opens a thread's first comment with HTML-comment markers and
+# collapsible <details>…</details> analysis chains that routinely overrun the per-body cap
+# and bury the actual finding (which the bot writes AFTER them). Strip both before capping.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_DETAILS_RE = re.compile(r"<details\b[^>]*>.*?</details>", re.DOTALL | re.IGNORECASE)
+_SUMMARY_RE = re.compile(r"<summary\b[^>]*>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_review_boilerplate(raw: str) -> str:
+    """Drop HTML comments and <details>…</details> blocks from a review comment body, then
+    collapse whitespace, so the finding survives the cap instead of the boilerplate. If
+    stripping leaves nothing, fall back to the first <summary> line (the collapsed block's
+    headline) so the thread still shows something rather than going blank."""
+    no_comments = _HTML_COMMENT_RE.sub(" ", raw or "")
+    body = " ".join(_DETAILS_RE.sub(" ", no_comments).split())
+    if not body and (m := _SUMMARY_RE.search(no_comments)):
+        summary = _HTML_TAG_RE.sub(" ", m.group(1))
+        first = next((ln for ln in summary.splitlines() if ln.strip()), "")
+        body = " ".join(first.split())
+    return body
+
+
 def _bounded(text: str, cap: int) -> str:
     return text if len(text) <= cap else text[:cap] + f"\n… (truncated at {cap} chars)"
 
@@ -719,8 +742,10 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         return _bounded("\n".join(lines), _MAX_PR_CHARS)
 
     @tool
-    async def github_review_threads(number: int, repo: str = "", include_resolved: bool = False) -> str:
-        """List a PR's inline review THREADS (resolvable line comments, e.g. CodeRabbit's) with the thread ids github_reply_thread / github_resolve_thread take; unresolved only unless include_resolved. Unresolved threads keep the PR's QA check from clearing, so after a fix round read, answer and resolve each."""
+    async def github_review_threads(
+        number: int, repo: str = "", include_resolved: bool = False, body_max_chars: int = 1000
+    ) -> str:
+        """List a PR's inline review THREADS (resolvable line comments, e.g. CodeRabbit's) with the thread ids github_reply_thread / github_resolve_thread take; unresolved only unless include_resolved. Each thread's first comment is stripped of HTML-comment / <details> boilerplate then capped at body_max_chars (clamped 200..8000, default 1000). Unresolved threads keep the PR's QA check from clearing, so after a fix round read, answer and resolve each."""
         repo = resolve_repo(repo, default_repo) or ""
         if err := bad_repo(repo):
             return err
@@ -757,12 +782,16 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         if not shown:
             return f"No {'' if include_resolved else 'unresolved '}review threads on {repo}#{number}."
         open_n = sum(1 for t in threads if not t.get("isResolved"))
+        try:
+            body_cap = max(200, min(int(body_max_chars), 8000))
+        except (TypeError, ValueError):
+            body_cap = _MAX_COMMENT_CHARS
         lines = [f"{open_n} unresolved of {len(threads)} review thread(s) on {repo}#{number}:"]
         for t in shown:
             first = (dicts((t.get("comments") or {}).get("nodes")) or [{}])[0]
-            body = " ".join(str(first.get("body") or "").split())
-            if len(body) > _MAX_COMMENT_CHARS:
-                body = body[: _MAX_COMMENT_CHARS - 1] + "…"
+            body = _strip_review_boilerplate(str(first.get("body") or ""))
+            if len(body) > body_cap:
+                body = body[: body_cap - 1] + "…"
             where = f"{t.get('path') or '?'}:{t.get('line') or '?'}"
             state = "resolved" if t.get("isResolved") else ("outdated" if t.get("isOutdated") else "open")
             replies = int(((t.get("comments") or {}).get("totalCount") or 1)) - 1
