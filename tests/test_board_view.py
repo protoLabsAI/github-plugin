@@ -613,7 +613,7 @@ let timerId = 0, lastIntervalMs = 0;
 function element(id){
   if(!elements.has(id)) elements.set(id, {
     id, dataset: {}, handlers: {}, attrs: {}, writes: 0, scrollTop: 0, isConnected: true,
-    classList: {add(){}, remove(){}},
+    classList: {values: new Set(), add(){}, remove(){}, toggle(name,on){if(on) this.values.add(name); else this.values.delete(name);}},
     set innerHTML(v){this.html=v; this.writes++;}, get innerHTML(){return this.html||'';},
     setAttribute(k,v){this.attrs[k]=v;}, getAttribute(k){return this.attrs[k];},
     addEventListener(k,v){this.handlers[k]=v;}, focus(){document.activeElement=this;},
@@ -772,9 +772,9 @@ def test_drawer_checks_tab_renders_summary_logs_and_badge():
   assert.ok(html.indexOf('evil') < html.indexOf('lint'));   // failing first
   assert.ok(html.indexOf('deploy') < html.indexOf('lint'));
   assert.ok(html.includes('&lt;b&gt;evil') && !html.includes('<b>evil'));  // check name escaped
-  assert.ok(html.includes('dot fail') && html.includes('dot pass') && html.includes('dot skipped'));
+  assert.ok(html.includes('pl-dot--error') && html.includes('pl-dot--success') && html.includes('class="pl-dot "'));
   assert.ok(html.includes('1m 5s'));                         // duration
-  assert.ok(element('drawer-tabs').innerHTML.includes('chk-badge">2<'));  // fail-count badge
+  assert.ok(element('drawer-tabs').innerHTML.includes('pl-badge pl-badge--error">2<'));  // fail-count badge
   // Lazily fetch the failure log for run 42.
   const before = requests.length;
   bodyClick({'data-run-id':'42'});
@@ -887,9 +887,9 @@ def test_drawer_escapes_checks_and_files_strings_and_tints_diffs():
 
     for fragment in ("esc(c.name", "esc(st.log)", "esc(f.path)", "esc(line)", "esc(c.workflow)"):
         assert fragment in PAGE
-    assert "chk-badge" in PAGE  # the fail-count badge markup
-    assert ".dl.add{background:var(--pl-color-success-muted" in PAGE
-    assert ".dl.del{background:var(--pl-color-danger-muted" in PAGE
+    assert "pl-badge pl-badge--error" in PAGE  # the fail-count badge markup
+    assert ".dl.add{background:color-mix(in srgb, var(--pl-color-status-success) 15%, transparent)" in PAGE
+    assert ".dl.del{background:color-mix(in srgb, var(--pl-color-status-error) 15%, transparent)" in PAGE
     assert ".dl.hunk{color:var(--pl-color-fg-muted)" in PAGE
     assert 'files: {label: "Files"' in PAGE and "poll: 30000" in PAGE  # Files polls no faster than 30s
     assert "setInterval(pollDrawer, (spec && spec.poll) || 15000)" in PAGE
@@ -954,7 +954,7 @@ def test_conversation_timeline_threads_summary_and_polling():
   assert.ok(!html.includes('resolved-second'));
   assert.ok(html.includes('href="https://github.com/o/n/pull/7#comment"'));
   assert.ok(html.includes('d ago'));
-  assert.ok(element('drawer-tabs').innerHTML.includes('Conversation<span class="chk-badge">1</span>'));
+  assert.ok(element('drawer-tabs').innerHTML.includes('Conversation<span class="pl-badge pl-badge--error">1</span>'));
   bodyClick({'data-thread':'resolved'});
   bodyClick({'data-thread':'open'});
   assert.ok(element('drawer-body').innerHTML.includes('resolved-first'));
@@ -966,7 +966,7 @@ def test_conversation_timeline_threads_summary_and_polling():
   assert.ok(html.includes('resolved-second'));
   assert.ok(!html.includes('thread-last'));
   assert.equal(element('drawer-body').scrollTop,80);
-  assert.ok(!element('drawer-tabs').innerHTML.includes('chk-badge'));
+  assert.ok(!element('drawer-tabs').innerHTML.includes('pl-badge pl-badge--error'));
   assert.ok(!conversationItem({...c('x'),url:'javascript:alert(1)'}).includes('javascript:'));
   pollDrawer(); const stale=latest();
   selectDrawerTab('overview',false);
@@ -1025,7 +1025,7 @@ def test_issue_drawer_escapes_sources_and_renders_linked_pr_chips():
     ):
         assert fragment in PAGE
     assert 'data-linked-pr="' in PAGE  # the linked-PR chip
-    assert 'class="d-count"' in PAGE  # the Comments count badge
+    assert 'class="pl-badge"' in PAGE  # the Comments count badge
     assert "Open on GitHub ↗" in PAGE
     assert ".md:not(.md-on){white-space:pre-wrap" in PAGE  # escaped fallback preserves whitespace
     for forbidden in ("markdown-it", "innerHTML = it.body"):
@@ -1116,7 +1116,7 @@ def test_issue_drawer_interactions_open_tabs_linked_prs_and_missing_fields():
   assert.ok(html.includes('Body truncated'));
   assert.ok(html.includes('data-linked-pr="34"'));
   // The Comments tab label carries a live count.
-  assert.ok(element('drawer-tabs').innerHTML.includes('Comments<span class="d-count">2</span>'));
+  assert.ok(element('drawer-tabs').innerHTML.includes('Comments<span class="pl-badge">2</span>'));
   // Arrow keys move across the issue tablist (same keyboard machinery as PR mode).
   for(const [key,want] of [['ArrowRight','comments'],['ArrowRight','overview'],['End','comments'],['Home','overview']]){
     let prevented=false;
@@ -1154,7 +1154,7 @@ def test_issue_drawer_interactions_open_tabs_linked_prs_and_missing_fields():
     assert.ok(!html.includes('>'+absent+'</dt>'),absent);
   assert.ok(!html.includes('Linked pull requests'));
   assert.ok(element('drawer-meta').innerHTML.includes('>open<'));  // plain state pill, no reason
-  assert.ok(element('drawer-tabs').innerHTML.includes('Comments<span class="d-count">0</span>'));
+  assert.ok(element('drawer-tabs').innerHTML.includes('Comments<span class="pl-badge">0</span>'));
   selectDrawerTab('comments',false);
   await reply(latest(),{number:99,title:'Bare',state:'OPEN',comments:[]});
   assert.ok(element('drawer-body').innerHTML.includes('No comments.'));
@@ -1211,7 +1211,10 @@ def test_pr_rows_render_a_ci_chip_passed_through_esc():
     assert 'CI_SYM = {passing:"✓", failing:"✗", pending:"●"}' in PAGE
     assert 'of "+total+" "+noun+" failing' in PAGE  # the "2 of 9 checks failing" tooltip
     assert "esc(tip)" in PAGE and "esc(checks.state)" in PAGE  # chip strings are escaped
-    assert ".ci-passing{color:#3fb950}" in PAGE and ".ci-failing{color:#f85149}" in PAGE
+    assert (
+        ".ci-passing{color:var(--pl-color-status-success)}" in PAGE
+        and ".ci-failing{color:var(--pl-color-status-error)}" in PAGE
+    )
 
 
 def test_load_more_grows_to_100_keeps_scroll_and_renders_ci_chip():
@@ -1440,7 +1443,7 @@ def test_every_prose_panel_marked_and_poll_reenhances_only_prose():
 (async()=>{
   const src='**body** <img src=x> " &';
   openDrawer('o/n',7);
-  const mdSources=html=>[...html.matchAll(/class="pr-body md" data-md="([^"]*)"/g)].map(m=>decode(m[1]));
+  const mdSources=html=>[...html.matchAll(/class="pr-body md pl-prose" data-md="([^"]*)"/g)].map(m=>decode(m[1]));
   assert.deepEqual(mdSources(prOverview({body:src,headRefName:src,baseRefName:src})),[src]);
   assert.deepEqual(mdSources(issueOverview({body:src,milestone:{title:src}})),[src]);
   assert.deepEqual(mdSources(issueComments({comments:[{body:src},{body:src}]})),[src,src]);
@@ -1465,6 +1468,74 @@ def test_every_prose_panel_marked_and_poll_reenhances_only_prose():
   assert.equal(nodes[0].dataset.mdOn,'1'); assert.ok(nodes[0].content.html.includes('one'));
   pollDrawer(); await reply(latest(),{number:7,body:'two'});
   assert.equal(nodes[0].dataset.mdOn,'1'); assert.ok(nodes[0].content.html.includes('two'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+def test_board_uses_plugin_kit_components_and_status_tokens():
+    import re
+
+    from ghplugin.view import PAGE
+
+    for component in (
+        "pl-tabs",
+        "pl-tab--active",
+        "pl-badge",
+        "pl-prose",
+        "pl-dot",
+        "pl-link",
+        "pl-iconbtn",
+        "pl-btn pl-btn--sm pl-btn--ghost",
+    ):
+        assert component in PAGE
+    for old in ("tabs", "tab", "pill", "d-count", "chk-badge", "dot", "lnk", "dx", "chip", "logbtn"):
+        assert f'class="{old}"' not in PAGE
+        assert not re.search(r"\." + re.escape(old) + r"[{.\[:]", PAGE.split("<style>", 1)[1].split("</style>", 1)[0])
+    for color in ("#3fb950", "#f85149", "#a371f7", "#d29922"):
+        assert color not in PAGE
+    assert "--pl-color-danger" not in PAGE
+    assert not re.search(r"--pl-color-(?:status-)?(?:success|error|warning|info|danger)-muted", PAGE)
+    assert PAGE.count('class="pr-body md pl-prose"') == 3
+    assert ".md:not(.md-on){white-space:pre-wrap}" in PAGE
+
+
+def test_board_component_variants_and_tab_selection():
+    _run_drawer_js(
+        r"""
+(async()=>{
+  for(const selected of ['prs','issues']){
+    setTab(selected);
+    for(const name of ['issues','prs']){
+      assert.equal(element('t-'+name).attrs['aria-selected'],name===selected);
+      assert.equal(element('t-'+name).classList.values.has('pl-tab--active'),name===selected);
+    }
+  }
+  openDrawer('o/n',7,element('opener'));
+  for(const selected of Object.keys(DRAWER_TABS)){
+    selectDrawerTab(selected,false);
+    const html=element('drawer-tabs').innerHTML;
+    assert.equal((html.match(/pl-tab--active/g)||[]).length,1);
+    assert.ok(html.includes('id="dtab-'+selected+'" class="pl-tab pl-tab--active" aria-selected="true"'));
+  }
+  for(const [state,isDraft,variant] of [
+    ['OPEN',false,' pl-badge--success'],['MERGED',false,' pl-badge--info'],
+    ['CLOSED',false,' pl-badge--info'],['OPEN',true,''],
+  ]){
+    updatePrHeader({state,isDraft});
+    assert.ok(element('drawer-meta').innerHTML.includes('class="pl-badge'+variant+'"'));
+    assert.ok(element('drawer-meta').innerHTML.includes('class="pl-link"'));
+    const row=prRow({state,isDraft},'o/n');
+    const dot=isDraft?'':state==='OPEN'?'pl-dot--success':'pl-dot--info';
+    assert.ok(row.includes('class="pl-dot '+dot+'"'));
+  }
+  for(const [state,variant] of [['OPEN','success'],['CLOSED','info']]){
+    updateIssueHeader({state});
+    assert.ok(element('drawer-meta').innerHTML.includes('class="pl-badge pl-badge--'+variant+'"'));
+    assert.ok(issueRow({state},'o/n').includes('pl-dot--'+variant));
+  }
+  assert.ok(labelPills([{name:'<bug>'}]).includes('class="pl-badge">&lt;bug&gt;'));
+  assert.ok(prChecks({checks:[{status:'IN_PROGRESS',name:'pending'}]}).includes('pl-dot--warning'));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     )
