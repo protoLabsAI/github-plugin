@@ -1336,3 +1336,88 @@ async def test_run_failure_retains_line_length_and_upper_budget_limits():
     lines = [f"error {i}: " + "x" * 250 for i in range(100)]
     out = await _failure("\n".join(lines), max_lines=100)
     assert out.splitlines()[1:] == [line[:200] for line in lines[-80:]]
+
+
+# ── github_review_threads: strip CodeRabbit boilerplate before the per-body cap ──
+
+
+def _threads_payload(body):
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "PRRT_x",
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "path": "a.py",
+                                    "line": 10,
+                                    "comments": {
+                                        "totalCount": 1,
+                                        "nodes": [{"author": {"login": "coderabbitai"}, "body": body, "url": "u"}],
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+async def _review_threads(body, **kwargs):
+    gh = AsyncMock(return_value=(0, _threads_payload(body), ""))
+    with patch("ghplugin.read_tools.run_gh", gh):
+        return await _tool("github_review_threads").ainvoke({"repo": "o/r", "number": 1, **kwargs})
+
+
+async def test_review_threads_strips_details_and_html_comments_before_cap():
+    # 1500+ chars of <details> analysis-chain boilerplate, then the real finding (r1, r2).
+    body = (
+        "<!-- a CodeRabbit marker that must never surface -->\n"
+        "<details>\n<summary>🧩 Analysis chain</summary>\n\n" + "boilerplate " * 150 + "\n</details>\n\n"
+        "**Potential bug:** the retry loop never resets `attempts`, so it spins forever."
+    )
+    assert len(body) > 1500
+    out = await _review_threads(body)
+    assert "the retry loop never resets `attempts`" in out
+    assert "boilerplate" not in out  # the <details> chain is gone
+    assert "<details>" not in out
+    assert "<!--" not in out and "CodeRabbit marker" not in out  # r2: HTML comments never shown
+
+
+async def test_review_threads_falls_back_to_summary_when_only_boilerplate():
+    body = "<!-- marker -->\n<details>\n<summary>🧩 Analysis chain</summary>\n\n" + "noise " * 100 + "\n</details>"
+    out = await _review_threads(body)
+    assert out.splitlines()[-1] == "🧩 Analysis chain"  # the collapsed block's headline
+    assert "noise" not in out
+
+
+async def test_review_threads_body_max_chars_controls_the_cap():
+    # 4000 returns up to 4000 chars for the body (3999 + the … ellipsis) (r3).
+    out = await _review_threads("x" * 5000, body_max_chars=4000)
+    body_line = out.splitlines()[-1]
+    assert len(body_line) == 4000 and body_line.endswith("…")
+
+
+@pytest.mark.parametrize("requested, effective", [(10, 200), (0, 200), (-5, 200), (50000, 8000)])
+async def test_review_threads_body_max_chars_is_clamped(requested, effective):
+    out = await _review_threads("y" * 9000, body_max_chars=requested)
+    body_line = out.splitlines()[-1]
+    assert len(body_line) == effective and body_line.endswith("…")
+
+
+async def test_review_threads_default_caps_plain_body_at_1000():
+    # r4: default behavior on a plain body is unchanged — the 1000-char cap still holds.
+    out = await _review_threads("z" * 1500)
+    body_line = out.splitlines()[-1]
+    assert len(body_line) == 1000 and body_line.endswith("…")
+
+
+async def test_review_threads_short_plain_body_is_returned_intact():
+    out = await _review_threads("Restore blobs/ if the history move fails.")
+    assert out.splitlines()[-1] == "Restore blobs/ if the history move fails."
