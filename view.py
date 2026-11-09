@@ -170,8 +170,8 @@ __SETUP_CSS__
   <div class="bar">
     <select id="repo" title="Repository"></select>
     <div class="pl-tabs" role="tablist">
-      <button class="pl-tab pl-tab--active" id="t-issues" role="tab" aria-selected="true" title="Issues">Issues</button>
-      <button class="pl-tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests">PRs</button>
+      <button class="pl-tab pl-tab--active" id="t-issues" role="tab" aria-selected="true" title="Issues"><span>Issues</span> <span class="pl-badge" id="count-issues" hidden></span></button>
+      <button class="pl-tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests"><span>PRs</span> <span class="pl-badge" id="count-prs" hidden></span></button>
     </div>
     <select id="state" title="State"><option value="open">Open</option><option value="closed">Closed</option><option value="all">All</option></select>
     <input id="search" type="search" placeholder="Search…" title="Search (Enter to run, Esc to clear)" aria-label="Search" autocomplete="off" />
@@ -305,7 +305,7 @@ __SETUP_CSS__
     refresh: svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
   };
 
-  function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); $("t-issues").classList.toggle("pl-tab--active", t==="issues"); $("t-prs").classList.toggle("pl-tab--active", t==="prs"); reload(); }
+  function setTab(t){ tab = t; $("t-issues").setAttribute("aria-selected", t==="issues"); $("t-prs").setAttribute("aria-selected", t==="prs"); $("t-issues").classList.toggle("pl-tab--active", t==="issues"); $("t-prs").classList.toggle("pl-tab--active", t==="prs"); reload(false); }
   function labelPills(labels){ return (labels||[]).slice(0,5).map(l => '<span class="pl-badge">'+esc(l.name||l)+'</span>').join(" "); }
 
   function issueRow(it, repo){
@@ -769,7 +769,38 @@ __SETUP_CSS__
       + "?repo="+encodeURIComponent(repo)+"&state="+encodeURIComponent($("state").value)
       + "&limit="+pageLimit + (q ? "&search="+encodeURIComponent(q) : "");
   }
-  function reload(){ pageLimit = PAGE_STEP; load(false); }
+  // Independent fence: tab switches and pagination do not invalidate counts.
+  let countsSeq = 0;
+  function renderCounts(data){
+    for(const [kind, title] of [["issues", "Issues"], ["prs", "Pull Requests"]]){
+      const value = data && !data.error ? data[kind] : null;
+      const count = typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "";
+      const badge = $("count-"+kind);
+      badge.textContent = count;
+      badge.hidden = count === "";
+      $("t-"+kind).title = count === "" ? title : title+" ("+count+")";
+    }
+  }
+  async function loadCounts(){
+    const my = ++countsSeq;
+    renderCounts(null);
+    const repo = $("repo").value, q = ($("search").value || "").trim();
+    if(!repo) return;
+    const path = "/api/plugins/github/counts"
+      + "?repo="+encodeURIComponent(repo)+"&state="+encodeURIComponent($("state").value)
+      + (q ? "&search="+encodeURIComponent(q) : "");
+    try {
+      const response = await kit.apiFetch(path);
+      const data = response.ok ? await response.json() : null;
+      if(my !== countsSeq) return;
+      renderCounts(data);
+    } catch(e){ if(my === countsSeq) renderCounts(null); }
+  }
+  function reload(counts){
+    pageLimit = PAGE_STEP;
+    if(counts !== false) loadCounts();
+    load(false);
+  }
   async function load(more){
     const my = ++loadSeq;
     const repo = $("repo").value, list = $("list");
@@ -807,7 +838,7 @@ __SETUP_JS__
     const sel = $("repo");
     sel.innerHTML = (cfg.repos||[]).map(r => '<option value="'+esc(r)+'">'+esc(r)+'</option>').join("");
     if(cfg.default_repo){ sel.value = cfg.default_repo; }
-    load();
+    reload();
   }
 
   $("refresh").innerHTML = ICON.refresh;
