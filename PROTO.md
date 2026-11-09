@@ -45,7 +45,7 @@ write_tools.py           # 12 write tools (create/edit issue+pr/merge/close/comm
 release_tools.py         # 3 release reads (run jobs, release, release asset) + 4 gated release writes (dispatch, tag, edit notes, upload asset)
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
-api.py                   # routers — public PAGES (view/workspace/new-issue) + gated data routes (config/status/issues/prs/issue)
+api.py                   # routers — public PAGES (view/workspace/new-issue) + gated data routes (config/status/issues/prs/counts/issue)
 view.py                  # PAGE = read-only board; NEW_ISSUE_PAGE = file-an-issue form; shared setup card. --pl-* themed
 skills/github/SKILL.md   # workflow manual (review / fix round / CI / issues / merge / release) — host auto-loads skills/
 tests/                   # host-free pytest (gating + version coherence + routes via TestClient + the no-raise sweep)
@@ -187,6 +187,13 @@ installed after boot is found by the next call.
 **Never block the loop on the picker**: `effective_default_repo` takes the picker as a
 getter and short-circuits when `default_repo` is set; the routes and `github_status`
 run the resolution via `asyncio.to_thread`; checkout remotes are cached 10 min.
+
+**Board totals**: gated `GET /api/plugins/github/counts?repo=owner/name&state=open&search=`
+returns `{issues: N, prs: N}` using one GraphQL search request, independent of list
+limits, or `{error: ...}` on failure. States are open/closed/merged/all; closed PRs
+include merged PRs, matching `gh pr list --state closed`. Merged always returns zero
+issues (issues cannot merge). Search is trimmed and capped at 256 characters, as on
+the list routes, and passed as GraphQL variables.
 
 ## 6. Rules
 

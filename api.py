@@ -143,6 +143,52 @@ async def fetch_prs(
     return {"items": items}
 
 
+async def fetch_counts(repo: str, state: str = "open", search: str = "") -> dict:
+    """Return issue/PR totals for the board filters in one GraphQL request.
+
+    Issues cannot be merged, so their count is always zero for ``state=merged``.
+    Search values are variables, never interpolated into the GraphQL document.
+    """
+    if err := bad_repo(repo):
+        return {"error": err}
+    norm = _norm_state(state)
+    if norm is None:
+        return {"error": f"Error: state must be open|closed|merged|all (got {state!r})."}
+    q = _search_arg(search)
+    # is:closed for PRs includes merged, matching gh pr list --state closed.
+    qualifier = "" if norm == "all" else f"is:{norm}"
+    issue_qualifier = "" if norm == "merged" else qualifier
+    issues = " ".join(filter(None, [f"repo:{repo}", "is:issue", issue_qualifier, q]))
+    prs = " ".join(filter(None, [f"repo:{repo}", "is:pr", qualifier, q]))
+    query = (
+        "query($issues: String!, $prs: String!) { "
+        "issues: search(query: $issues, type: ISSUE, first: 0) { issueCount } "
+        "prs: search(query: $prs, type: ISSUE, first: 0) { issueCount } }"
+    )
+    rc, out, serr = await run_gh(
+        ["api", "graphql", "-f", f"query={query}", "-f", f"issues={issues}", "-f", f"prs={prs}"]
+    )
+    if gh_err := check_gh_error(rc, serr, repo=repo):
+        return {"error": gh_err}
+    result, perr = parse_json(out, dict)
+    if perr:
+        return {"error": perr}
+    if result.get("errors"):
+        return {"error": "Error: GitHub GraphQL returned errors while fetching counts."}
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return {"error": "Error: unexpected gh output (expected data object)."}
+    counts = {}
+    for name in ("issues", "prs"):
+        node = data.get(name)
+        if not isinstance(node, dict) or type(node.get("issueCount")) is not int or node["issueCount"] < 0:
+            return {"error": f"Error: unexpected gh output (expected non-negative integer data.{name}.issueCount)."}
+        counts[name] = node["issueCount"]
+    if norm == "merged":
+        counts["issues"] = 0
+    return counts
+
+
 def _repos(cfg: dict) -> list[str]:
     """The picker list — the explicit ``github.repos`` entries (first, operator order)
     UNION the host's ADR 0095 managed-projects registry (v0.115.0+) UNION the repos
@@ -252,6 +298,10 @@ def build_data_router(cfg, registry=None):
     async def _prs(repo: str, state: str = "open", limit: int = 30, search: str = "") -> dict:
         # with_checks=True adds the CI rollup the board renders as a per-row chip.
         return await fetch_prs(repo, state, limit, with_checks=True, search=search)
+
+    @router.get("/counts")
+    async def _counts(repo: str, state: str = "open", search: str = "") -> dict:
+        return await fetch_counts(repo, state, search)
 
     @router.get("/detail/pr")
     async def _detail_pr(repo: str, number: int, fresh: int = 0) -> dict:
