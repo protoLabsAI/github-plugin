@@ -1274,7 +1274,7 @@ def test_search_box_debounces_runs_on_enter_and_clears_on_esc():
   element('search').handlers.input();
   assert.equal(requests.length, base);   // debounced, not yet sent
   runTimeouts();                         // the 300ms timer fires reload()
-  assert.equal(requests.length, base+1);
+  assert.equal(requests.length, base+2);  // list and independent counts
   assert.ok(requests[latest()].path.includes('&search=crash%20bug'));  // one encoded param
   assert.ok(requests[latest()].path.includes('limit=30'));             // search resets to page 1
   await reply(latest(), {items: []});
@@ -1536,6 +1536,75 @@ def test_board_component_variants_and_tab_selection():
   }
   assert.ok(labelPills([{name:'<bug>'}]).includes('class="pl-badge">&lt;bug&gt;'));
   assert.ok(prChecks({checks:[{status:'IN_PROGRESS',name:'pending'}]}).includes('pl-dot--warning'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    )
+
+
+def test_board_count_badges_and_query_contract():
+    from ghplugin.view import PAGE
+
+    for kind, label in (("issues", "Issues"), ("prs", "PRs")):
+        assert f'<span>{label}</span> <span class="pl-badge" id="count-{kind}" hidden></span></button>' in PAGE
+    counts = PAGE.split("async function loadCounts(){", 1)[1].split("\n  function reload", 1)[0]
+    assert '"/api/plugins/github/counts"' in counts
+    assert '"?repo="+encodeURIComponent(repo)+"&state="+encodeURIComponent($("state").value)' in counts
+    assert '(q ? "&search="+encodeURIComponent(q) : "")' in counts
+    assert 'q = ($("search").value || "").trim()' in counts
+    assert "const my = ++countsSeq;" in counts
+    assert "if(my !== countsSeq) return;" in counts
+    assert "response.ok ? await response.json() : null" in counts
+    assert "catch(e){ if(my === countsSeq) renderCounts(null); }" in counts
+    assert 'typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : ""' in PAGE
+    assert "data && !data.error ? data[kind] : null" in PAGE
+    assert 'badge.hidden = count === "";' in PAGE  # formatted zero is non-empty
+    assert 'count === "" ? title : title+" ("+count+")"' in PAGE
+    assert "if(counts !== false) loadCounts();\n    load(false);" in PAGE
+    assert "await loadCounts(" not in PAGE
+    assert "reload(false);" in PAGE
+    boot = PAGE.split("async function boot(){", 1)[1].split("\n  }", 1)[0]
+    assert "reload();" in boot
+
+
+def test_board_counts_zero_errors_and_stale_responses():
+    _run_drawer_js(
+        r"""
+(async()=>{
+  element('repo').value='o/n'; element('state').value='open'; element('search').value=' bug ';
+  reload();
+  assert.equal(requests[0].path, '/api/plugins/github/counts?repo=o%2Fn&state=open&search=bug');
+  await reply(1, {items: []});  // list renders while counts remain pending
+  assert.ok(element('list').innerHTML.includes('No issues'));
+  await reply(0, {issues:0, prs:1234});
+  assert.equal(element('count-issues').textContent, '0');
+  assert.equal(element('count-issues').hidden, false);
+  assert.equal(element('t-issues').title, 'Issues (0)');
+  assert.equal(element('count-prs').textContent, (1234).toLocaleString());
+  setTab('prs');
+  assert.equal(requests.length, 3);
+  loadCounts(); const old = latest();
+  loadCounts(); const fresh = latest();
+  await reply(fresh, {issues:42, prs:7});
+  await reply(old, {error:'stale failure'});
+  assert.equal(element('count-issues').textContent, '42');
+  loadCounts(); const rejected = latest();
+  loadCounts(); await reply(latest(), {issues:8, prs:9});
+  requests[rejected].reject(new Error('stale network failure')); await flush();
+  assert.equal(element('count-issues').textContent, '8');
+  for(const [data, ok] of [[{error:'failed'},true], [{issues:0,prs:0},false],
+                          [{issues:'0',prs:null},true], [null,true]]){
+    loadCounts(); await reply(latest(), data, ok);
+    for(const kind of ['issues','prs']){
+      assert.equal(element('count-'+kind).textContent, '');
+      assert.equal(element('count-'+kind).hidden, true);
+    }
+    assert.equal(element('t-issues').title, 'Issues');
+    assert.equal(element('t-prs').title, 'Pull Requests');
+  }
+  loadCounts(); requests[latest()].reject(new Error('offline')); await flush();
+  assert.equal(element('count-issues').hidden, true);
+  element('repo').value=''; const before = requests.length;
+  loadCounts(); assert.equal(requests.length, before);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     )
