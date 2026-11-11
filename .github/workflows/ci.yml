@@ -1,8 +1,7 @@
 name: CI
 
-# Lint + test the plugin. Host-free: needs only requirements-dev.txt (no protoAgent).
-# Runs on the org's Namespace Linux profile; falls back to a GitHub-hosted runner on
-# a fork via the NSC_RUNNER repo variable.
+# Lint + test the plugin. Host-free: needs only requirements-dev.txt (no protoAgent). Runs on
+# a GitHub-hosted runner (ubuntu-latest).
 on:
   pull_request:
   push:
@@ -11,7 +10,7 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ vars.NSC_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
