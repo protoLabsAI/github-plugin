@@ -239,3 +239,69 @@ async def test_gh_failure_surfaces_error():
     with patch("ghplugin.gh_issue.run_gh", fake):
         out = await run_issue_command(f"Crash on empty --bug --repo o/n\n{_GOOD_BUG_BODY}", default_repo="")
     assert out.startswith("Error (gh exit 1):") and "forbidden" in out
+
+
+# ── a task-scoped default repo (#72; pr-reviewer-plugin#367) ───────────────────────────────────
+
+
+def test_a_scoped_default_wins_over_the_configured_one_but_not_over_an_explicit_repo(monkeypatch):
+    from ghplugin.gh_issue import scoped_default, scoped_default_repo
+
+    monkeypatch.delenv("GITHUB_DEFAULT_REPO", raising=False)
+    monkeypatch.delenv("GH_REPO", raising=False)
+    assert scoped_default() == ""
+    with scoped_default_repo("o/bound"):
+        assert resolve_repo(None, "o/default") == "o/bound"  # the job's repo, not the agent's
+        assert resolve_repo("", lambda: "o/default") == "o/bound"
+        assert resolve_repo("o/explicit", "o/default") == "o/explicit"  # explicit still wins
+        with scoped_default_repo("o/inner"):
+            assert resolve_repo(None, "o/default") == "o/inner"
+        assert resolve_repo(None, "o/default") == "o/bound"  # restored on exit
+    assert resolve_repo(None, "o/default") == "o/default"  # and gone after the job
+    assert scoped_default() == ""
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "not-a-repo", "a/b/c", None])
+def test_a_malformed_scope_changes_nothing(bad):
+    from ghplugin.gh_issue import scoped_default_repo
+
+    with scoped_default_repo(bad):
+        assert resolve_repo(None, "o/default") == "o/default"
+
+
+async def test_the_scope_follows_the_job_into_the_tasks_it_starts_and_nowhere_else():
+    import asyncio
+
+    from ghplugin.gh_issue import scoped_default_repo
+
+    seen: dict[str, str | None] = {}
+
+    async def tool_call(name):
+        await asyncio.sleep(0)
+        seen[name] = resolve_repo(None, "o/default")
+
+    outside = asyncio.ensure_future(asyncio.sleep(0.01))  # a task started before the scope
+    with scoped_default_repo("o/bound"):
+        await asyncio.gather(tool_call("subagent-a"), tool_call("subagent-b"))
+    await outside
+    await tool_call("after")
+    assert seen == {"subagent-a": "o/bound", "subagent-b": "o/bound", "after": "o/default"}
+
+
+async def test_a_read_tool_inside_the_scope_targets_the_scoped_repo():
+    from ghplugin import read_tools
+    from ghplugin.gh_issue import scoped_default_repo
+
+    calls = []
+
+    async def fake_gh(args, *a, **k):
+        calls.append(args)
+        return 0, "{}", ""
+
+    tools = {t.name: t for t in read_tools.get_read_tools("o/default")}
+    with patch.object(read_tools, "run_gh", fake_gh):
+        with scoped_default_repo("o/bound"):
+            await tools["github_get_pr"].ainvoke({"number": 7})
+        await tools["github_get_pr"].ainvoke({"number": 7})
+    repos = [a[a.index("--repo") + 1] for a in calls if "--repo" in a]
+    assert repos[0] == "o/bound" and repos[-1] == "o/default"
