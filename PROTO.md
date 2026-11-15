@@ -206,7 +206,9 @@ the list routes, and passed as GraphQL variables.
 - **`@tool` docstrings must be PLAIN string literals** — an f-string docstring makes
   `__doc__` None and the tool ships with no description (the model can't see it).
 - **Every tool requires an `owner/name` repo** — validate with `bad_repo()`. The
-  fallback when the arg is omitted is the LIVE configured default (`default_repo` >
+  fallback when the arg is omitted is the task's SCOPED default if a caller set one
+  (`gh_issue.scoped_default_repo(repo)`, a context manager another plugin wraps around a job
+  bound to one repo — the pr-reviewer's review round), else the LIVE configured default (`default_repo` >
   first picker entry; the picker = `github.repos` ∪ the host's `projects:` registry ∪
   the `origin` remote of each registered checkout / `project_board.repo`), then the
   `GITHUB_DEFAULT_REPO` / `GH_REPO` env **logged at INFO when it fires**. No repo

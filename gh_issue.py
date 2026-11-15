@@ -28,6 +28,8 @@ it's the one non-obvious source) > an error asking for one. Auth rides on `gh_cl
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import re
@@ -173,15 +175,42 @@ def default_repo_error(value: str) -> str | None:
     )
 
 
+# The default repo for the CURRENT task, when a caller scoped one (#72). A host plugin that runs a
+# job bound to one repo — the pr-reviewer's review round — sets it for the job's duration, so a
+# tool call inside that job that omits `repo` resolves to the job's repo instead of the agent-wide
+# default. Without it, a finder reviewing mythxengine that dropped `repo` read the first entry of
+# `github.repos` (protoAgent) and reviewed the wrong codebase (pr-reviewer-plugin#367). A context
+# variable, so it follows the job into the tasks and subagents it starts and nowhere else.
+_SCOPED_DEFAULT: contextvars.ContextVar[str] = contextvars.ContextVar("github_scoped_default_repo", default="")
+
+
+@contextlib.contextmanager
+def scoped_default_repo(repo: str):
+    """Make `repo` the default for tool calls in this context (and the tasks it starts). An
+    explicit `repo` argument still wins; a malformed or empty `repo` scopes nothing."""
+    value = (repo or "").strip()
+    token = _SCOPED_DEFAULT.set(value if REPO_RE.match(value) else _SCOPED_DEFAULT.get())
+    try:
+        yield
+    finally:
+        _SCOPED_DEFAULT.reset(token)
+
+
+def scoped_default() -> str:
+    """The repo scoped for the current task by `scoped_default_repo`, else ``""``."""
+    return _SCOPED_DEFAULT.get()
+
+
 def resolve_repo(explicit: str | None, default_repo="") -> str | None:
-    """Target repo: explicit ``--repo`` > configured default > GITHUB_DEFAULT_REPO
-    / GH_REPO env > ``None`` (caller errors — there is no silent default).
+    """Target repo: explicit ``--repo`` > the task's scoped default (`scoped_default_repo`) >
+    configured default > GITHUB_DEFAULT_REPO / GH_REPO env > ``None`` (caller errors — there
+    is no silent default).
 
     ``default_repo`` may be a string or a zero-arg getter (evaluated only when no
     explicit repo was passed — see ``current_default``). The env step is the only
     source a person can't see in Settings, so it's logged at INFO whenever it's what
     actually decided the repo (never silently)."""
-    chosen = (explicit or "").strip() or current_default(default_repo)
+    chosen = (explicit or "").strip() or scoped_default() or current_default(default_repo)
     if chosen:
         return chosen
     for var in ("GITHUB_DEFAULT_REPO", "GH_REPO"):
