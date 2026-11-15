@@ -111,6 +111,9 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-bottom:1px solid var(--pl-color-border)}
   .row:hover{background:var(--pl-color-bg)}
   .row .top{display:flex;align-items:baseline;gap:7px}
+  /* The DS dot is a shrinkable flex item: beside a title that wraps (.row .top) it lost width and
+     rendered as an oval. Pin it here until .pl-dot carries flex:none upstream (protoContent#679). */
+  .pl-dot{flex:none}
   .title{font-weight:600;line-height:1.35}
   .num{color:var(--pl-color-fg-muted);font-weight:400}
   .meta{margin-top:3px;font-size:11px;color:var(--pl-color-fg-muted);display:flex;gap:6px;flex-wrap:wrap;align-items:center}

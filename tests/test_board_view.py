@@ -1608,3 +1608,11 @@ def test_board_counts_zero_errors_and_stale_responses():
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     )
+
+
+def test_status_dot_never_shrinks_in_a_flex_row():
+    """A long title wraps and the flex row shrinks its children; the 8px dot lost width and
+    rendered as an oval. The page pins it so it stays round at any panel width."""
+    from ghplugin.view import PAGE
+
+    assert ".pl-dot{flex:none}" in PAGE
