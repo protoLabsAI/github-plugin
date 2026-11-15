@@ -22,7 +22,7 @@ import re
 from langchain_core.tools import tool
 
 from .gh_cli import bad_repo, check_gh_error, dicts, error_kind, parse_json, run_gh
-from .gh_issue import current_default, default_repo_error, resolve_repo
+from .gh_issue import current_default, default_repo_error, resolve_repo, scoped_default
 
 # Error-relevant lines to surface from a failed CI log (github_run_failure).
 _CI_ERR_RE = re.compile(
@@ -848,6 +848,11 @@ def get_read_tools(default_repo="", repos=None, registry=None) -> list:
         text = summarize_status(st)
         if bad := default_repo_error(default):
             text += f" NOTE: {bad}"
+        # Inside a job that scoped its own default (#72) the tools resolve an omitted `repo` to
+        # THAT repo, not the configured one — say so, or the model is told the wrong default.
+        # The operator banner (`compute_and_report` above) keeps the configured default.
+        if (scoped := scoped_default()) and scoped != default:
+            text += f" In this job the github_* tools default to {scoped} (configured default: {default or 'none'})."
         return text
 
     return [

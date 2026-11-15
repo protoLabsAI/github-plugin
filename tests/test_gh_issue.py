@@ -305,3 +305,16 @@ async def test_a_read_tool_inside_the_scope_targets_the_scoped_repo():
         await tools["github_get_pr"].ainvoke({"number": 7})
     repos = [a[a.index("--repo") + 1] for a in calls if "--repo" in a]
     assert repos[0] == "o/bound" and repos[-1] == "o/default"
+
+
+async def test_github_status_names_the_scoped_default_inside_a_scoped_job():
+    from ghplugin import read_tools
+    from ghplugin.gh_issue import scoped_default_repo
+
+    tools = {t.name: t for t in read_tools.get_read_tools("o/default", ["o/default"])}
+    with patch("ghplugin.status.resolve_gh", return_value=None):
+        outside = await tools["github_status"].ainvoke({})
+        with scoped_default_repo("o/bound"):
+            inside = await tools["github_status"].ainvoke({})
+    assert "In this job" not in outside
+    assert "In this job the github_* tools default to o/bound (configured default: o/default)." in inside
