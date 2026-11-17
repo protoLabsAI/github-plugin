@@ -1,7 +1,7 @@
 """The GitHub console pages — served at ``/plugins/github/*`` (by api.py) and iframed
 by the console. Two pages, shared across console surfaces:
 
-- ``PAGE`` (``/view`` and ``/workspace``) — the **read-only board**: a quick look at a project's board,
+- ``PAGE`` (``/view``) — the **read-only board**: a quick look at a project's board,
   two tabs (Issues / Pull Requests) over a repo picker (the configured ``github.repos``)
   + an open/closed/all filter. No writes — it's a viewer. Declared in the manifest as a
   right-dock view AND a ⌘K palette morph (``palette: inline``), plus a full-width rail view.
