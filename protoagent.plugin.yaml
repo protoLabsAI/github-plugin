@@ -2,7 +2,7 @@
 # Keep `version` in lockstep with pyproject.toml (tests/test_version.py asserts it).
 id: github
 name: GitHub (read/write tools)
-version: 0.12.1
+version: 0.12.2
 description: >-
   Read AND write GitHub tools over the `gh` CLI, with PER-AGENT write gating. The
   read tools (PRs — list + merge readiness, issues, comments, search-before-filing,
@@ -63,15 +63,14 @@ settings:
   - {key: repos, label: "Repo picker list", type: string_list}
 
 # Console views (ADR 0026/0057) — sandboxed iframes the plugin serves itself (api.py).
-#  - the READ-ONLY board (Issues/PRs tabs over the repo picker): right dock + a ⌘K morph
+#  - the READ-ONLY board (Issues/PRs tabs over the repo picker): ONE view + a ⌘K morph
 #    (`palette: inline` opens the board in the palette body). `placement: right` is just a
-#    default — views are drag-sortable in the console.
-#  - the same READ-ONLY board at /workspace: full-width GitHub rail view.
+#    default — views are drag-sortable across every dock, so a second view of the same
+#    board for another placement is only a duplicate icon (removed in 0.12.2).
 #  - FILE AN ISSUE (the compact form): a util-bar widget pill (`utility`, opens its dialog)
 #    AND a distinct ⌘K palette page (`palette: { path }`). Filing lives here + the palette,
 #    NOT in the board — the board is a viewer.
 views:
-  - { id: github-workspace, label: GitHub, icon: Github, path: /plugins/github/workspace, placement: rail }
   - { id: github, label: GitHub, icon: Github, path: /plugins/github/view, placement: right, palette: inline }
   - { id: github-new-issue, label: New issue, icon: Bug, path: /plugins/github/new-issue, utility: { info: "File a GitHub issue" }, palette: { path: /plugins/github/new-issue } }
 
@@ -80,7 +79,6 @@ views:
 # plugin public_paths feature; older hosts ignore it (the pages stay open-mode only).
 # The page is chrome; the DATA it fetches stays gated under /api/plugins/github/*.
 public_paths:
-  - /plugins/github/workspace
   - /plugins/github/view
   - /plugins/github/new-issue
 

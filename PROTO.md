@@ -45,7 +45,7 @@ write_tools.py           # 12 write tools (create/edit issue+pr/merge/close/comm
 release_tools.py         # 3 release reads (run jobs, release, release asset) + 4 gated release writes (dispatch, tag, edit notes, upload asset)
 review_tools.py          # 3 verdict tools (comment/approve/request-changes, guarded) — gated
 gh_issue.py              # /issue chat command logic + repo resolution (resolve_repo, default_repo_error)
-api.py                   # routers — public PAGES (view/workspace/new-issue) + gated data routes (config/status/issues/prs/counts/issue)
+api.py                   # routers — public PAGES (view/new-issue) + gated data routes (config/status/issues/prs/counts/issue)
 view.py                  # PAGE = read-only board; NEW_ISSUE_PAGE = file-an-issue form; shared setup card. --pl-* themed
 skills/github/SKILL.md   # workflow manual (review / fix round / CI / issues / merge / release) — host auto-loads skills/
 tests/                   # host-free pytest (gating + version coherence + routes via TestClient + the no-raise sweep)
@@ -57,10 +57,10 @@ host exposes `register_router` (guarded — degrade-safe): the PAGES on the PUBL
 DATA routes on the GATED `/api/plugins/github` prefix (pages fetch them with the DS
 plugin-kit's `apiFetch`, which attaches the operator bearer from the postMessage
 handshake). Pages are vanilla JS themed entirely from `--pl-*` tokens (no host build).
-Three manifest `views`, four surfaces, deliberately split:
+Two manifest `views`, three surfaces, deliberately split:
 - **`/view`** — the READ-ONLY board (Issues/PRs tabs + repo picker + state filter). Right
-  dock + a ⌘K morph (`palette: inline`). No writes — it's a viewer.
-- **`/workspace`** — the same READ-ONLY board and PR drawer in the full-width GitHub rail.
+  dock by default (movable to any dock) + a ⌘K morph (`palette: inline`). No writes — it's a
+  viewer. ONE view only: a second view of the same page just doubles the rail icon.
 - **`/new-issue`** — the compact file-an-issue form. A util-bar widget pill (`utility`,
   opens its dialog) AND a distinct ⌘K page (`palette: { path }`). `POST /issue` reuses the
   SAME `file_issue` gate path as the `/issue` command, so they can't diverge.

@@ -562,26 +562,20 @@ def test_routes_resolve_the_picker_off_the_event_loop():
     assert all(t.name.startswith("asyncio_") for t in threads), [t.name for t in threads]
 
 
-def test_workspace_serves_same_page_and_is_public():
+def test_board_is_one_view_and_workspace_route_is_gone():
+    """One board, one rail icon: views are movable across docks, so a second view of the
+    same page (the old `github-workspace`) only rendered a duplicate GitHub icon."""
     from pathlib import Path
 
     import yaml
-    from ghplugin.view import PAGE
 
     client = TestClient(_app())
-    response = client.get("/plugins/github/workspace")
-    assert response.status_code == 200
-    assert response.text == client.get("/plugins/github/view").text == PAGE
+    assert client.get("/plugins/github/workspace").status_code == 404
     manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
-    assert "/plugins/github/workspace" in manifest["public_paths"]
-    workspace = next(v for v in manifest["views"] if v["id"] == "github-workspace")
-    assert workspace == {
-        "id": "github-workspace",
-        "label": "GitHub",
-        "icon": "Github",
-        "path": "/plugins/github/workspace",
-        "placement": "rail",
-    }
+    board_views = [v for v in manifest["views"] if v["path"] == "/plugins/github/view"]
+    assert [v["id"] for v in board_views] == ["github"]
+    assert [v["id"] for v in manifest["views"]] == ["github", "github-new-issue"]
+    assert "/plugins/github/workspace" not in manifest["public_paths"]
 
 
 def test_drawer_shell_and_markdown_security_contract():
