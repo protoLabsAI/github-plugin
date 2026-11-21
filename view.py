@@ -97,15 +97,23 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   html,body{margin:0;height:100%;background:var(--pl-color-bg-raised);color:var(--pl-color-fg);
     font-family:var(--pl-font-sans,ui-sans-serif,system-ui,sans-serif);font-size:13px}
   #wrap{display:flex;flex-direction:column;height:100%;min-height:0}
-  .bar{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;
+  /* Two deliberate rows at every width — never a flex-wrap. Each row draws exactly one rule:
+     the head row's is the tab strip's baseline (the tabs' own border is dropped so it can't
+     double up), the filter row's separates the toolbar from the list. */
+  .bar{display:flex;flex-direction:column;flex:none}
+  .bar-row{display:flex;flex-wrap:nowrap;gap:6px;min-width:0;
     border-bottom:var(--pl-border-width,1px) solid var(--pl-color-border)}
+  .bar-head{align-items:flex-end;padding:6px 8px 0}
+  .bar-head .pl-tabs{flex:none;margin-left:auto;border-bottom:0}
+  .bar-filters{align-items:center;padding:6px 8px}
   select{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
     border-radius:var(--pl-radius,8px);padding:4px 6px;font-size:12px;max-width:220px}
+  #repo{flex:1 1 auto;min-width:0;max-width:320px;margin-bottom:6px}
+  #state{flex:none}
   #search{background:var(--pl-color-bg);color:var(--pl-color-fg);border:1px solid var(--pl-color-border);
-    border-radius:var(--pl-radius,8px);padding:4px 7px;font-size:12px;min-width:120px;max-width:220px;flex:1 1 140px}
+    border-radius:var(--pl-radius,8px);padding:4px 7px;font-size:12px;min-width:0;flex:1 1 auto}
   .ico{width:1em;height:1em;flex:none;vertical-align:-0.15em}
-  #refresh{display:inline-flex;align-items:center;justify-content:center;padding:4px 7px;color:var(--pl-color-fg-muted)}
-  .spacer{flex:1}
+  #refresh{display:inline-flex;align-items:center;justify-content:center;padding:4px 7px;color:var(--pl-color-fg-muted);flex:none}
   #list{flex:1;min-height:0;overflow:auto;padding:4px 0}
   .row{display:block;text-decoration:none;color:inherit;padding:9px 12px;
     border-bottom:1px solid var(--pl-color-border)}
@@ -171,15 +179,18 @@ __SETUP_CSS__
 </style></head><body>
 <div id="wrap">
   <div class="bar">
-    <select id="repo" title="Repository"></select>
-    <div class="pl-tabs" role="tablist">
-      <button class="pl-tab pl-tab--active" id="t-issues" role="tab" aria-selected="true" title="Issues"><span>Issues</span> <span class="pl-badge" id="count-issues" hidden></span></button>
-      <button class="pl-tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests"><span>PRs</span> <span class="pl-badge" id="count-prs" hidden></span></button>
+    <div class="bar-row bar-head">
+      <select id="repo" title="Repository"></select>
+      <div class="pl-tabs" role="tablist">
+        <button class="pl-tab pl-tab--active" id="t-issues" role="tab" aria-selected="true" title="Issues"><span>Issues</span> <span class="pl-badge" id="count-issues" hidden></span></button>
+        <button class="pl-tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests"><span>PRs</span> <span class="pl-badge" id="count-prs" hidden></span></button>
+      </div>
     </div>
-    <select id="state" title="State"><option value="open">Open</option><option value="closed">Closed</option><option value="all">All</option></select>
-    <input id="search" type="search" placeholder="Search…" title="Search (Enter to run, Esc to clear)" aria-label="Search" autocomplete="off" />
-    <span class="spacer"></span>
-    <button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>
+    <div class="bar-row bar-filters">
+      <select id="state" title="State"><option value="open">Open</option><option value="closed">Closed</option><option value="all">All</option></select>
+      <input id="search" type="search" placeholder="Search…" title="Search (Enter to run, Esc to clear)" aria-label="Search" autocomplete="off" />
+      <button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>
+    </div>
   </div>
   <div id="setup" role="status"></div>
   <div id="list"><div class="hint">Loading…</div></div>

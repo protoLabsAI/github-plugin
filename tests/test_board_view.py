@@ -1610,3 +1610,66 @@ def test_status_dot_never_shrinks_in_a_flex_row():
     from ghplugin.view import PAGE
 
     assert ".pl-dot{flex:none}" in PAGE
+
+
+def test_toolbar_is_two_explicit_rows_that_never_wrap():
+    """The toolbar used to be one ``flex-wrap:wrap`` row, so a narrow pane broke it wherever
+    things stopped fitting and drew two mismatched rules. It is two deliberate rows at every
+    width: repo + tabs, then state + search + refresh — neither wraps, and the shrinkable
+    controls carry ``min-width:0`` so they give way instead of overflowing."""
+    import re
+
+    from ghplugin.view import PAGE
+
+    start = PAGE.index('<div class="bar">')
+    bar = PAGE[start : PAGE.index('<div id="setup"', start)]
+    rows = re.findall(r'<div class="(bar-row [\w-]+)">', bar)
+    assert rows == ["bar-row bar-head", "bar-row bar-filters"]  # exactly two row containers
+    head, filters = bar.split('<div class="bar-row bar-filters">')
+
+    # Row 1: the repo picker, then the Issues/PRs tablist — and none of the filters.
+    assert 0 < head.index('id="repo"') < head.index('class="pl-tabs" role="tablist"')
+    assert head.index('role="tablist"') < head.index('id="t-issues"') < head.index('id="t-prs"')
+    assert not any(f'id="{i}"' in head for i in ("state", "search", "refresh"))
+    # Row 2: state, search, refresh — in that order — and nothing from row 1.
+    assert 0 < filters.index('id="state"') < filters.index('id="search"') < filters.index('id="refresh"')
+    assert not any(f'id="{i}"' in filters for i in ("repo", "t-issues", "t-prs"))
+    assert "pl-tabs" not in filters
+
+    # The spacer is gone (search fills the row instead), from the markup and the CSS.
+    assert "spacer" not in bar
+    css = PAGE[PAGE.index("<style>") : PAGE.index("</style>")]
+    assert ".spacer" not in css
+
+    def rule(selector: str) -> str:
+        return re.search(r"(?m)^\s*" + re.escape(selector) + r"\{([^}]*)\}", css).group(1)
+
+    # Neither row wraps; the old single-row bar's wrap is gone.
+    assert "flex-wrap:nowrap" in rule(".bar-row")
+    for sel in (".bar", ".bar-row", ".bar-head", ".bar-filters"):
+        assert "flex-wrap:wrap" not in rule(sel)
+    # The shrinkable controls shrink; the fixed ones don't.
+    assert "min-width:0" in rule("#repo") and "flex:1 1 auto" in rule("#repo")
+    assert "max-width" in rule("#repo")  # doesn't dominate a wide pane
+    assert "min-width:0" in rule("#search") and "flex:1 1 auto" in rule("#search")
+    assert "max-width" not in rule("#search")  # fills the row
+    assert "flex:none" in rule("#state") and "flex:none" in rule("#refresh")
+    assert "flex:none" in rule(".bar-head .pl-tabs")
+    # One rule per row: the head row draws it, so the tabs' own border must not double it.
+    assert "border-bottom:0" in rule(".bar-head .pl-tabs")
+    assert "border-bottom" in rule(".bar-row") and "border-bottom" not in rule(".bar")
+
+    # Every control keeps the attributes the JS and the other tests bind to.
+    for snippet in (
+        '<select id="repo" title="Repository"></select>',
+        '<div class="pl-tabs" role="tablist">',
+        '<button class="pl-tab pl-tab--active" id="t-issues" role="tab" aria-selected="true" title="Issues">',
+        '<span class="pl-badge" id="count-issues" hidden></span>',
+        '<button class="pl-tab" id="t-prs" role="tab" aria-selected="false" title="Pull Requests">',
+        '<span class="pl-badge" id="count-prs" hidden></span>',
+        '<select id="state" title="State">',
+        '<input id="search" type="search" placeholder="Search…" title="Search (Enter to run, Esc to clear)" '
+        'aria-label="Search" autocomplete="off" />',
+        '<button class="pl-btn pl-btn--sm" id="refresh" type="button" title="Refresh" aria-label="Refresh"></button>',
+    ):
+        assert snippet in bar
